@@ -30,6 +30,7 @@ import { PresetPanel } from "../PresetPanel";
 import { ReplayBar } from "../ReplayBar";
 import { Badge, EmptyState, Metric, Panel, ProgressBar, StatusDot } from "../ui";
 import { DishGrid } from "./DishGrid";
+import { DishTrendPanel } from "./DishTrendPanel";
 import { ScanHeatmap } from "./ScanHeatmap";
 
 const SCAN_TONE: Record<string, "ok" | "warn" | "alert" | "info" | "neutral"> = {
@@ -117,6 +118,14 @@ export function RTAView() {
     () => dishes.find((dish) => dish.id === selectedDishId) ?? null,
     [dishes, selectedDishId],
   );
+
+  /**
+   * The trend chart follows the selected dish, falling back to the first dish so
+   * the panel is populated before anything is clicked. The topic is derived when
+   * the dish has no sample yet (a cleared replay window, for instance).
+   */
+  const trendDishId = selectedDish?.id ?? "dish-001";
+  const trendTopic = selectedDish?.topic ?? `arl/rta/${trendDishId}/telemetry/normal`;
 
   useEffect(() => {
     if (!selectedDish?.id || pointingSeededFor === selectedDish.id) return;
@@ -360,6 +369,8 @@ export function RTAView() {
               />
             </div>
           </Panel>
+
+          <DishTrendPanel dishId={trendDishId} topic={trendTopic} warnC={RTA_DISH_TEMP_WARN_C} />
 
           <Panel
             title="Dish rack"
@@ -945,7 +956,7 @@ export function RTAView() {
             )}
           </Panel>
 
-          <AlertAnnunciator title="RTA alerts" maxHeight="max-h-[380px]" />
+          <AlertAnnunciator title="Annunciator · RTA alerts" maxHeight="max-h-[380px]" />
         </div>
       </div>
     </div>

@@ -54,6 +54,9 @@ export interface ReplayBounds {
 }
 
 export const REPLAY_SPEEDS = [1, 2, 4, 8] as const;
+/** Window presets, in minutes: half an hour, an hour, three hours. */
+export const REPLAY_WINDOWS = [30, 60, 180] as const;
+const REPLAY_WINDOW_DEFAULT_MINUTES = 30;
 const STEP_MS = 5 * 60 * 1000;
 const MAX_ALERTS = 200;
 const STREAM_BUFFER = 900;
@@ -74,6 +77,12 @@ export interface TelemetryStoreValue {
   playing: boolean;
   speed: number;
   cursorMs: number;
+  /**
+   * How much history the replay window covers, in minutes: the alert/event
+   * context around the cursor and the span of every history chart. One value so
+   * "show me the three hours around the storm" means the same thing everywhere.
+   */
+  windowMinutes: number;
   bounds: ReplayBounds;
   loading: boolean;
   topics: Record<string, TopicState>;
@@ -103,6 +112,7 @@ export interface TelemetryStoreValue {
   setCursorMs: (value: number) => void;
   setPlaying: (playing: boolean) => void;
   setSpeed: (speed: number) => void;
+  setWindowMinutes: (minutes: number) => void;
   step: (deltaMs: number) => void;
   refreshBounds: () => Promise<void>;
   reloadAlerts: () => Promise<void>;
@@ -141,6 +151,7 @@ export function TelemetryProvider({
   const [mode, setModeState] = useState<"live" | "replay">("live");
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<number>(2);
+  const [windowMinutes, setWindowMinutes] = useState<number>(REPLAY_WINDOW_DEFAULT_MINUTES);
   const [cursorMs, setCursorMsState] = useState<number>(() => Date.now());
   const [bounds, setBounds] = useState<ReplayBounds>({
     earliest: null,
@@ -365,7 +376,7 @@ export function TelemetryProvider({
     const timer = setTimeout(async () => {
       try {
         const snapshot = await getJson<ReplaySnapshot>(
-          `/api/replay?timestamp=${encodeURIComponent(new Date(cursorMs).toISOString())}${serviceQuery(
+          `/api/replay?timestamp=${encodeURIComponent(new Date(cursorMs).toISOString())}&windowMinutes=${windowMinutes}${serviceQuery(
             service,
             "&",
           )}`,
@@ -398,7 +409,7 @@ export function TelemetryProvider({
       controller.abort();
       clearTimeout(timer);
     };
-  }, [mode, cursorMs, service]);
+  }, [mode, cursorMs, windowMinutes, service]);
 
   const refreshBounds = useCallback(async () => {
     try {
@@ -540,6 +551,7 @@ export function TelemetryProvider({
       playing,
       speed,
       cursorMs,
+      windowMinutes,
       bounds,
       loading,
       topics,
@@ -560,6 +572,7 @@ export function TelemetryProvider({
       setCursorMs,
       setPlaying,
       setSpeed,
+      setWindowMinutes,
       step,
       refreshBounds,
       reloadAlerts,
@@ -573,6 +586,7 @@ export function TelemetryProvider({
       playing,
       speed,
       cursorMs,
+      windowMinutes,
       bounds,
       loading,
       topics,
@@ -591,6 +605,7 @@ export function TelemetryProvider({
       error,
       setMode,
       setCursorMs,
+      setWindowMinutes,
       step,
       refreshBounds,
       reloadAlerts,

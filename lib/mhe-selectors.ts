@@ -7,6 +7,7 @@ import {
   MHE_SPO2_MIN_PCT,
   MHE_SURVEY_INTERVAL_MS,
   MHE_TELEMETRY_STALE_MS,
+  MHE_VITALS_STALE_MS,
   kelvinToCelsius,
   type MheCrewHealth,
   type MheCrewSurvey,
@@ -456,6 +457,16 @@ export function deriveMheAlerts(
     }
     if (member.surveyAt && now - Date.parse(member.surveyAt) > MHE_SURVEY_INTERVAL_MS) {
       alerts.push({ tone: "warn", message: `${member.name}: crew survey overdue.` });
+    }
+    // "Crew member's data disappears": vitals are published every minute, so a
+    // member whose stream has gone quiet is a health signal in itself, not just
+    // a gap on the dashboard.
+    if (member.healthAt && now - Date.parse(member.healthAt) > MHE_VITALS_STALE_MS) {
+      const silentMinutes = Math.round((now - Date.parse(member.healthAt)) / 60000);
+      alerts.push({
+        tone: "alert",
+        message: `${member.name}: vitals silent for ${silentMinutes} min (expected every minute).`,
+      });
     }
   }
 

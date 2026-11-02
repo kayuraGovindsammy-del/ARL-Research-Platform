@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { guidanceFor, severityRank } from "@/lib/alert-guidance";
-import { formatDateTime, formatNumber, timeAgo, titleCase } from "@/lib/format";
+import { getJson } from "@/lib/api-client";
+import { formatDateTime, formatNumber, formatTime, timeAgo, titleCase } from "@/lib/format";
 import { useTelemetry } from "@/lib/telemetry-store";
 import { THEME } from "@/lib/theme";
 import { alertSeverity, type AlertRecord, type AlertStatus } from "@/lib/types";
@@ -28,6 +29,23 @@ const SERVICE_ORDER = ["RTA", "MHE", "OPG", "LWM"] as const;
 
 type ActionKind = "acknowledge" | "resolve";
 type StatusFilter = AlertStatus | "ALL";
+
+/** One row of the operator action trail (`GET /api/audit`). */
+interface AuditEntry {
+  id: string;
+  action: string;
+  performedBy: string;
+  details: string;
+  timestamp: string;
+}
+
+/** Refusals are the entries an investigator looks for, so they read as alerts. */
+function auditTone(action: string): Tone {
+  if (action.includes("DENIED") || action.includes("REJECTED")) return "alert";
+  if (action.includes("RESOLVED")) return "ok";
+  if (action.includes("ACKNOWLEDGED")) return "warn";
+  return "neutral";
+}
 
 /** Milliseconds between two ISO timestamps, or null when either is missing. */
 function elapsed(from: string | null, to: string | null): number | null {
@@ -73,8 +91,35 @@ export function AlertLogView() {
   const [severityFilter, setSeverityFilter] = useState<string>("ALL");
   const [query, setQuery] = useState("");
   const [action, setAction] = useState<{ kind: ActionKind; alert: AlertRecord } | null>(null);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [auditError, setAuditError] = useState<string | null>(null);
 
   const readOnly = mode === "replay";
+
+  /**
+   * The other half of "auditable": alert actions are mirrored on the alert rows,
+   * but commands, setting changes and refused attempts only exist in the audit
+   * table, so the trail is read from the API rather than derived here.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await getJson<{ entries: AuditEntry[] }>("/api/audit?limit=30");
+        if (cancelled) return;
+        setAudit(response.entries);
+        setAuditError(null);
+      } catch (caught) {
+        if (!cancelled) setAuditError(caught instanceof Error ? caught.message : String(caught));
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -402,6 +447,34 @@ export function AlertLogView() {
         )}
       </Panel>
 
+      <Panel
+        title="Operator action trail"
+        subtitle="Every acknowledged, resolved, refused or commanded action with the identity and platform-clock time that made it — the record of who did what, not just what fired."
+        actions={<Badge tone={auditError ? "warn" : "neutral"}>{audit.length} entries</Badge>}
+      >
+        {audit.length === 0 ? (
+          <EmptyState
+            message="No operator actions recorded yet."
+            hint={auditError ?? "Commanding or acting on an alert writes the first entry."}
+          />
+        ) : (
+          <ul className="divide-y divide-console-edge/40">
+            {audit.map((entry) => (
+              <li key={entry.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1.5 text-[11px]">
+                <span className="font-mono text-console-muted" title={formatDateTime(entry.timestamp)}>
+                  {formatTime(entry.timestamp)}
+                </span>
+                <Badge tone={auditTone(entry.action)}>{titleCase(entry.action)}</Badge>
+                <span className="font-mono text-console-info">{entry.performedBy}</span>
+                <span className="min-w-0 flex-1 truncate text-console-muted" title={entry.details}>
+                  {entry.details}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
       {readOnly && replayContext && (
         <Panel
           title="Service events at this point"
@@ -419,7 +492,7 @@ export function AlertLogView() {
                   className="flex flex-wrap items-center gap-x-2 gap-y-0.5 py-1.5 text-[11px]"
                 >
                   <span className="font-mono text-console-muted">
-                    {formatDateTime(event.timestamp).slice(11, 19)}
+                    {formatTime(event.timestamp)}
                   </span>
                   <span className="font-mono uppercase tracking-[0.12em] text-console-info">
                     {event.service}

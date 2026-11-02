@@ -525,6 +525,12 @@ export interface MheSubsystems {
 
 export const MHE_SURVEY_INTERVAL_MS = 12 * 60 * 60 * 1000;
 export const MHE_TELEMETRY_STALE_MS = 15 * 60 * 1000;
+/**
+ * Vitals publish once a minute, so five silent minutes is five missed samples —
+ * long enough not to fire on a dropped packet, short enough that a crew member
+ * whose stream has stopped is noticed while it still matters.
+ */
+export const MHE_VITALS_STALE_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // OPG — On-Demand Power Generation

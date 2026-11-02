@@ -9,7 +9,14 @@ import {
   resolveAlert,
   type ServiceAlertEvent,
 } from "@/lib/alerts";
-import { alertStatusAt, getLatestSampleAt, getReplayContext, getSnapshot } from "@/lib/snapshot";
+import {
+  alertStatusAt,
+  getLatestSampleAt,
+  getReplayContext,
+  getSnapshot,
+  getTopicBounds,
+  getTopicHistory,
+} from "@/lib/snapshot";
 
 /**
  * Persistence and integration behaviour, against a real SQLite file.
@@ -74,6 +81,34 @@ describe("replay snapshot", () => {
 
     const earlier = await getSnapshot(at(-2), null);
     expect(earlier.topics["arl/rta/d-001/telemetry/system"].payload.system_temp_c).toBe(300);
+  });
+
+  it("bounds a trend window at the cursor instead of the newest sample", async () => {
+    // This is what lets a chart describe the storm, not the present: samples
+    // after the cursor must never be plotted in a historical window.
+    const topic = "arl/rta/d-002/telemetry/normal";
+    await sample("RTA", topic, { temperature_k: 300 }, at(-10));
+    await sample("RTA", topic, { temperature_k: 305 }, at(-5));
+    await sample("RTA", topic, { temperature_k: 320 }, at(5));
+
+    const atCursor = await getTopicHistory(topic, at(-20), 100, T0);
+    expect(atCursor.map((row) => row.payload.temperature_k)).toEqual([300, 305]);
+
+    const unbounded = await getTopicHistory(topic, at(-20), 100);
+    expect(unbounded).toHaveLength(3);
+  });
+
+  it("reports when a topic was recorded, so an empty replay window explains itself", async () => {
+    // The researcher jumps back further than the capture reaches; the chart is
+    // empty but the panel can say the topic only starts at the first sample.
+    const topic = "arl/rta/d-003/telemetry/normal";
+    await sample("RTA", topic, { temperature_k: 300 }, at(-10));
+    await sample("RTA", topic, { temperature_k: 302 }, at(-4));
+
+    const bounds = await getTopicBounds(topic);
+    expect(bounds.samples).toBe(2);
+    expect(bounds.earliest).toBe(at(-10).toISOString());
+    expect(bounds.latest).toBe(at(-4).toISOString());
   });
 
   it("keeps every service's topics in one picture, and can scope to one", async () => {

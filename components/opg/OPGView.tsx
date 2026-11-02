@@ -11,8 +11,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { fetchPowerHistory } from "@/lib/api-client";
-import { formatNumber, formatTime, timeAgo, titleCase } from "@/lib/format";
+import { fetchPowerHistory, type TopicWindow } from "@/lib/api-client";
+import { formatDateTime, formatNumber, formatTime, timeAgo, titleCase } from "@/lib/format";
 import {
   computeTotals,
   deriveOpgAlerts,
@@ -56,10 +56,13 @@ const PRIORITY_LABEL: Record<GenerationPriority, string> = {
 };
 
 export function OPGView() {
-  const { topics, mode, lastTelemetryAt } = useTelemetry();
+  const { topics, mode, cursorMs, windowMinutes, lastTelemetryAt } = useTelemetry();
   const { operator, setOperator } = useOperator();
   const { run, pending, feedback } = useCommandRunner();
   const now = useNow(30_000);
+  /** Replay anchors the trend window to the cursor instead of the live edge. */
+  const replayAnchor = mode === "replay" ? cursorMs : null;
+  const windowLabel = windowMinutes >= 60 ? `${windowMinutes / 60} h` : `${windowMinutes} min`;
 
   const power = useMemo(() => getPower(topics), [topics]);
   const state = power?.state ?? null;
@@ -69,6 +72,7 @@ export function OPGView() {
 
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyWindow, setHistoryWindow] = useState<TopicWindow | null>(null);
   /**
    * The reserve draft is seeded once from whatever the batteries publish, so a
    * telemetry tick never rewrites the value the operator is dragging. The
@@ -85,36 +89,44 @@ export function OPGView() {
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
-      try {
-        const response = await fetchPowerHistory(60);
-        if (cancelled) return;
-        setTrend(
-          response.samples
-            .map((sample) => toTrendPoint(sample.payload, sample.timestamp))
-            .filter((point) => Number.isFinite(point.t))
-            .sort((a, b) => a.t - b.t)
-            .slice(-360),
-        );
-        setHistoryError(null);
-      } catch (caught) {
-        if (!cancelled) setHistoryError(caught instanceof Error ? caught.message : String(caught));
-      }
-    })();
+    // Re-anchored whenever the window size or the replay cursor moves, so the
+    // chart always describes the moment the rest of the console is showing.
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetchPowerHistory(windowMinutes, replayAnchor);
+          if (cancelled) return;
+          setTrend(
+            response.samples
+              .map((sample) => toTrendPoint(sample.payload, sample.timestamp))
+              .filter((point) => Number.isFinite(point.t))
+              .sort((a, b) => a.t - b.t)
+              .slice(-720),
+          );
+          setHistoryWindow(response.available);
+          setHistoryError(null);
+        } catch (caught) {
+          if (!cancelled) setHistoryError(caught instanceof Error ? caught.message : String(caught));
+        }
+      })();
+    }, 250);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, []);
+  }, [windowMinutes, replayAnchor]);
 
   const powerTimestamp = power?.timestamp ?? null;
   useEffect(() => {
-    if (!power) return;
+    if (!power || mode === "replay") return;
+    // Live only: in replay the history query already brackets the cursor, and
+    // appending snapshot samples would leave points from later in the replay.
     const point = toCombinedTrendPoint(power.state, power.timestamp);
     setTrend((previous) => {
       const next = [...previous.filter((entry) => entry.t !== point.t), point].sort((a, b) => a.t - b.t);
-      return next.slice(-360);
+      return next.slice(-720);
     });
-  }, [power, powerTimestamp]);
+  }, [power, powerTimestamp, mode]);
 
   const supplyMode = (state?.supplyMode ?? "").toString().toUpperCase();
   const priority = (state?.generationPriority ?? "").toString();
@@ -161,6 +173,18 @@ export function OPGView() {
 
   const issue = (control: string, entity: string, value: unknown, label: string) =>
     run({ service: "OPG", entity, control, value, researcher: operator }, label);
+
+  /**
+   * An empty trend is normally a replay window that starts before the recording
+   * does, so name the recorded range rather than just "no history".
+   */
+  const historyHint =
+    historyError ??
+    (historyWindow && historyWindow.samples > 0
+      ? `Power is recorded from ${formatDateTime(historyWindow.earliest)} to ${formatDateTime(
+          historyWindow.latest,
+        )} — this window ends before the first sample.`
+      : "Samples are recorded as soon as the OPG controller publishes.");
 
   return (
     <div
@@ -339,7 +363,13 @@ export function OPGView() {
         <div className="space-y-4 xl:col-span-2">
           <Panel
             title="Generation vs demand"
-            subtitle="Last 60 minutes of aggregated plant samples."
+            subtitle={
+              mode === "replay"
+                ? `${windowLabel} of plant samples ending at the replay cursor (${formatTime(
+                    new Date(cursorMs).toISOString(),
+                  )}).`
+                : `Last ${windowLabel} of aggregated plant samples.`
+            }
             actions={
               <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-console-muted">
                 <span className="text-console-solar">solar</span>
@@ -352,7 +382,7 @@ export function OPGView() {
               {trend.length === 0 ? (
                 <EmptyState
                   message="No power history yet."
-                  hint={historyError ?? "Samples are recorded as soon as the OPG controller publishes."}
+                  hint={historyHint}
                 />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
@@ -417,7 +447,15 @@ export function OPGView() {
               )}
             </div>
             <p className="mt-2 text-[10px] uppercase tracking-[0.12em] text-console-muted">
-              current sample {power?.timestamp ? formatTime(power.timestamp) : "—"} · {trend.length} points
+              {mode === "replay" ? "cursor sample" : "current sample"}{" "}
+              {power?.timestamp ? formatTime(power.timestamp) : "—"} · {trend.length} points
+              {trend.length > 1 && (
+                <>
+                  {" "}
+                  · output {formatNumber(trend[0].solarKw + trend[0].dieselKw, 1)} →{" "}
+                  {formatNumber(trend[trend.length - 1].solarKw + trend[trend.length - 1].dieselKw, 1)} kW
+                </>
+              )}
             </p>
           </Panel>
 
@@ -672,7 +710,7 @@ export function OPGView() {
             </div>
           </Panel>
 
-          <AlertAnnunciator title="OPG alerts" maxHeight="max-h-[420px]" />
+          <AlertAnnunciator title="Annunciator · OPG alerts" maxHeight="max-h-[420px]" />
         </div>
       </div>
     </div>

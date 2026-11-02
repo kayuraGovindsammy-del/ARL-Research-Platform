@@ -298,6 +298,24 @@ describe("MHE derived alerts", () => {
     expect(messages.some((message) => message.includes("SpO₂"))).toBe(true);
     expect(messages.some((message) => message.includes("survey overdue"))).toBe(true);
   });
+
+  it("alerts when a crew member's vitals disappear", () => {
+    // Vitals are published once a minute; eight silent minutes is a dropout,
+    // not a slow tick, and the spec calls this out as an alert condition.
+    const crew: CrewEntry[] = [
+      {
+        id: "crew-2",
+        name: "Spec Osei",
+        health: { heartRateBpm: 72, spo2Pct: 98 } as never,
+        survey: null,
+        healthAt: new Date(NOW - 8 * 60_000).toISOString(),
+        surveyAt: new Date(NOW - 60 * 60_000).toISOString(),
+      },
+    ];
+    const messages = deriveMheAlerts([], crew, NOW).map((alert) => alert.message);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("vitals silent for 8 min");
+  });
 });
 
 function baseRecord() {

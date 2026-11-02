@@ -820,7 +820,7 @@ export function MHEView() {
             </p>
           </Panel>
 
-          <AlertAnnunciator title="MHE alerts" maxHeight="max-h-[420px]" />
+          <AlertAnnunciator title="Annunciator · MHE alerts" maxHeight="max-h-[420px]" />
         </div>
       </div>
     </div>

@@ -206,11 +206,45 @@ export interface PowerSample {
 /** `arl/opg/global/telemetry/power` is OPG's aggregated plant sample. */
 export const OPG_POWER_TOPIC = "arl/opg/global/telemetry/power";
 
-export async function fetchPowerHistory(minutes = 30) {
-  return getJson<{
-    topic: string;
-    samples: Array<{ payload: Record<string, unknown>; timestamp: string }>;
-  }>(`/api/telemetry/history?topic=${OPG_POWER_TOPIC}&minutes=${minutes}&limit=360`);
+export interface TopicWindow {
+  earliest: string | null;
+  latest: string | null;
+  samples: number;
+}
+
+export interface TopicHistoryResponse {
+  topic: string;
+  since: string;
+  until: string;
+  samples: Array<{ payload: Record<string, unknown>; timestamp: string }>;
+  /**
+   * Recording range of the topic, sent only when the requested window was
+   * empty — it turns "no samples" into "this topic starts at 11:20".
+   */
+  available: TopicWindow | null;
+}
+
+/**
+ * Samples of one topic for a window of `minutes`, ending at `until`.
+ *
+ * `until` is the replay cursor: passing it makes the chart describe the moment
+ * being replayed instead of the present. Omitted, the server anchors the window
+ * to the platform clock.
+ */
+export async function fetchTopicHistory(
+  topic: string,
+  options: { minutes?: number; until?: number | null; limit?: number } = {},
+): Promise<TopicHistoryResponse> {
+  const minutes = options.minutes ?? 30;
+  const limit = options.limit ?? 360;
+  const until = options.until ? `&until=${encodeURIComponent(new Date(options.until).toISOString())}` : "";
+  return getJson<TopicHistoryResponse>(
+    `/api/telemetry/history?topic=${encodeURIComponent(topic)}&minutes=${minutes}&limit=${limit}${until}`,
+  );
+}
+
+export async function fetchPowerHistory(minutes = 30, until?: number | null) {
+  return fetchTopicHistory(OPG_POWER_TOPIC, { minutes, until });
 }
 
 export type { PowerSource };

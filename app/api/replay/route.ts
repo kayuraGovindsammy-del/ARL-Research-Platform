@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getLatestSampleAt, getReplayContext, getSnapshot, getTelemetryBounds } from "@/lib/snapshot";
+import {
+  REPLAY_CONTEXT_WINDOW_MS,
+  getLatestSampleAt,
+  getReplayContext,
+  getSnapshot,
+  getTelemetryBounds,
+} from "@/lib/snapshot";
 import { toService } from "@/lib/types";
 
 /**
  * Historical snapshot API.
  *
- *   GET /api/replay?timestamp=2026-11-02T09:15:00Z&service=RTA
+ *   GET /api/replay?timestamp=2026-11-02T09:15:00Z&service=RTA&windowMinutes=180
  *   GET /api/replay?timestamp=1762070400000        (epoch ms also accepted)
  *   GET /api/replay?bounds=1&service=RTA           (scrubber bounds)
  *
@@ -13,6 +19,11 @@ import { toService } from "@/lib/types";
  * by topic so the dashboards can re-render a full instrument state — plus the
  * alerts that were live at that instant and the service events around it, so
  * replay is integrated with the alert system rather than chart-only.
+ *
+ * `windowMinutes` sizes the context window (alerts raised before the cursor and
+ * the events that led to it); it accepts 5 minutes to 12 hours and defaults to
+ * 30. The dashboards pass their replay-window selector, so a three-hour
+ * investigation shows three hours of alerts, events and trend charts.
  */
 
 export const runtime = "nodejs";
@@ -47,9 +58,13 @@ export async function GET(request: NextRequest) {
     const latest = rawTimestamp ? null : await getLatestSampleAt(service);
     const fallback = latest && latest.getTime() > Date.now() ? latest : new Date();
     const target = parseTimestamp(rawTimestamp) ?? fallback;
+    const requestedWindow = Number(params.get("windowMinutes") ?? params.get("window") ?? "");
+    const windowMs = Number.isFinite(requestedWindow)
+      ? Math.min(Math.max(requestedWindow, 5), 12 * 60) * 60 * 1000
+      : REPLAY_CONTEXT_WINDOW_MS;
     const [snapshot, context] = await Promise.all([
       getSnapshot(target, service),
-      getReplayContext(target, service),
+      getReplayContext(target, service, windowMs),
     ]);
 
     return NextResponse.json(

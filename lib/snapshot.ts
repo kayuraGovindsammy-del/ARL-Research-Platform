@@ -185,16 +185,23 @@ export async function getTelemetryBounds(
 }
 
 /**
- * Latest state of a single topic, used for chart seeding without waiting for a
- * live sample to arrive.
+ * Samples of a single topic between `since` and `until`, used to seed charts.
+ *
+ * `until` is what makes a chart follow the replay cursor: without it the window
+ * would always end at the newest sample, so scrubbing back would change the
+ * instrument panels but the trend would keep describing the present.
  */
 export async function getTopicHistory(
   topic: string,
   since: Date,
   limit = 240,
+  until?: Date | null,
 ): Promise<Array<{ payload: Record<string, unknown>; timestamp: string }>> {
   const rows = await prisma.telemetry.findMany({
-    where: { topic, timestamp: { gte: since } },
+    where: {
+      topic,
+      timestamp: until ? { gte: since, lte: until } : { gte: since },
+    },
     orderBy: { timestamp: "desc" },
     take: Math.min(Math.max(limit, 1), 2000),
     select: { payload: true, timestamp: true },
@@ -206,6 +213,33 @@ export async function getTopicHistory(
       timestamp: row.timestamp.toISOString(),
     }))
     .reverse();
+}
+
+/**
+ * Recording range of one topic.
+ *
+ * A chart that comes back empty inside a replay window is ambiguous: either the
+ * topic is silent, or the window reaches back further than the recording does.
+ * This says which, so the panel can point at the first sample instead of
+ * leaving the researcher to guess.
+ */
+export async function getTopicBounds(
+  topic: string,
+): Promise<{ earliest: string | null; latest: string | null; samples: number }> {
+  const [bounds, samples] = await Promise.all([
+    prisma.telemetry.aggregate({
+      where: { topic },
+      _min: { timestamp: true },
+      _max: { timestamp: true },
+    }),
+    prisma.telemetry.count({ where: { topic } }),
+  ]);
+
+  return {
+    earliest: bounds._min.timestamp ? bounds._min.timestamp.toISOString() : null,
+    latest: bounds._max.timestamp ? bounds._max.timestamp.toISOString() : null,
+    samples,
+  };
 }
 
 /**

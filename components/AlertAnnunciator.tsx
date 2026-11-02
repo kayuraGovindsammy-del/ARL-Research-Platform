@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { guidanceFor, severityRank } from "@/lib/alert-guidance";
-import { formatDateTime, timeAgo, titleCase } from "@/lib/format";
+import { formatDateTime, formatTime, timeAgo, titleCase } from "@/lib/format";
 import { useTelemetry, type ServiceEvent } from "@/lib/telemetry-store";
 import { THEME } from "@/lib/theme";
 import { alertSeverity, type AlertRecord, type AlertStatus } from "@/lib/types";
+import { useOperator } from "@/lib/use-operator";
 import { Badge, EmptyState, Modal, Panel, StatusDot, toneAccent, type Tone } from "./ui";
 
 const STATUS_TONE: Record<AlertStatus, Tone> = {
@@ -195,12 +196,12 @@ export function describeEvent(event: ServiceEvent): string {
   return parts.join(" · ");
 }
 
-function EventStrip({ events }: { events: ServiceEvent[] }) {
+function EventStrip({ events, windowMs }: { events: ServiceEvent[]; windowMs: number }) {
   const recent = events.slice(-8).reverse();
   if (recent.length === 0) {
     return (
       <p className="px-3 py-2 text-[11px] text-console-muted">
-        No service events in the 30 minutes before this point.
+        No service events in the {Math.round(windowMs / 60000)} minutes before this point.
       </p>
     );
   }
@@ -211,7 +212,7 @@ function EventStrip({ events }: { events: ServiceEvent[] }) {
           key={`${event.timestamp}-${event.kind}-${index}`}
           className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-[11px]"
         >
-          <span className="font-mono text-console-muted">{formatDateTime(event.timestamp).slice(11, 19)}</span>
+          <span className="font-mono text-console-muted">{formatTime(event.timestamp)}</span>
           <span className="font-mono uppercase tracking-[0.12em] text-console-info">{event.service}</span>
           <span className="text-console-ink">{event.kind}</span>
           <span className="truncate text-console-muted">{describeEvent(event)}</span>
@@ -232,10 +233,23 @@ export function AlertActionModal({
   onClose: () => void;
   onSubmit: (researcher: string, note: string) => Promise<void>;
 }) {
-  const [researcher, setResearcher] = useState("");
+  const { operator } = useOperator();
+  /**
+   * The action is attributed to the researcher code the console is already
+   * commanding with, because the platform also checks that the code is cleared
+   * for the alert's service. The field stays editable so a second researcher
+   * can take over an alert from the same workstation.
+   */
+  const [researcher, setResearcher] = useState(operator);
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // The code is seeded from `/api/health` after mount; adopt it only while
+    // the operator has not typed anything of their own.
+    setResearcher((current) => current || operator);
+  }, [operator]);
 
   const isResolve = kind === "resolve";
   const guidance = guidanceFor(alert.alertType, alert.service);
@@ -245,7 +259,7 @@ export function AlertActionModal({
     setError(null);
 
     if (researcher.trim().length < 2) {
-      setError("Enter your researcher name or ID (minimum 2 characters).");
+      setError("Enter your researcher code (minimum 2 characters).");
       return;
     }
     if (isResolve && note.trim().length < 3) {
@@ -277,18 +291,22 @@ export function AlertActionModal({
       <form onSubmit={handleSubmit} className="space-y-3">
         <div>
           <label className="label" htmlFor="researcher">
-            Researcher name / ID <span className="text-console-alert">*</span>
+            Researcher code <span className="text-console-alert">*</span>
           </label>
           <input
             id="researcher"
             className="input"
             value={researcher}
             onChange={(event) => setResearcher(event.target.value)}
-            placeholder="e.g. Dr. A. Okafor / RA-2291"
+            placeholder="e.g. arl-as3"
             autoFocus
             disabled={submitting}
             required
           />
+          <p className="mt-1 text-[10px] text-console-muted">
+            Must be cleared for {alert.service} — the platform checks the code against the ARL API
+            before it touches the alert.
+          </p>
         </div>
 
         <div>
@@ -473,7 +491,7 @@ export function AlertAnnunciator({
           <p className="px-3 pt-2 text-[10px] uppercase tracking-[0.14em] text-console-muted">
             Service events in the {Math.round(replayContext.windowMs / 60000)} minutes before this point
           </p>
-          <EventStrip events={replayContext.events} />
+          <EventStrip events={replayContext.events} windowMs={replayContext.windowMs} />
         </div>
       )}
 

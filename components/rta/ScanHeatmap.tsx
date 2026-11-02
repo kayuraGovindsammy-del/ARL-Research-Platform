@@ -418,6 +418,7 @@ export function ScanHeatmap({
     () => (stats && stats.pixels ? (stats.filled / stats.pixels) * 100 : 0),
     [stats],
   );
+  const bandLabel = formatBand(activeContext?.bandHz);
 
   return (
     <div className="space-y-2">
@@ -443,6 +444,7 @@ export function ScanHeatmap({
             {(activeContext.fovRad * (180 / Math.PI)).toFixed(2)}° fov
           </span>
         )}
+        {bandLabel && <span className="text-console-info">band {bandLabel}</span>}
         <span>scan {scanId ?? "—"}</span>
         {hydrating && <span className="text-console-signal">rebuilding…</span>}
         {!hydrating && hydrateNote && <span>{hydrateNote}</span>}
@@ -458,4 +460,14 @@ function countAt(samples: ScanSamplePoint[], timestamp: string): number {
     if (point.timestamp === timestamp) count += 1;
   }
   return count;
+}
+
+/**
+ * Each scan is imaged at one frequency band, and different bands show different
+ * features of the same target — so the image has to say which band it is, or two
+ * scans of one target become indistinguishable pictures.
+ */
+function formatBand(hz: number | null | undefined): string | null {
+  if (typeof hz !== "number" || !Number.isFinite(hz) || hz <= 0) return null;
+  return hz >= 1e9 ? `${(hz / 1e9).toFixed(2)} GHz` : `${(hz / 1e6).toFixed(0)} MHz`;
 }

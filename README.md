@@ -35,7 +35,7 @@ npm run start               # serves the build on :3000
 Tests (no lab, no broker, no network required):
 
 ```bash
-npm test                    # vitest run — 97 tests, 5 files
+npm test                    # vitest run — 100 tests, 5 files
 npm run test:watch
 npm run typecheck           # tsc --noEmit
 ```
@@ -148,10 +148,16 @@ No sign-in: the platform runs on the operator's workstation. The operator code i
 first-class field (`components/ResearcherBadge.tsx`) because it decides both attribution and
 whether a service will accept a command.
 
-The replay transport bar sits on every console page: **Replay** toggles between live SSE and
-the historical snapshot, **play/pause**, **rewind**, **fast-forward** and **speed**
-(×1/×2/×4/×8) move a cursor through the captured window, and the alert list plus service
-events re-render at that cursor rather than at now.
+The replay transport bar sits on every console page, including `/alerts`, because every
+researcher has the same access to it: **Replay** toggles between live SSE and the historical
+snapshot, **play/pause**, **rewind**, **fast-forward** and **speed** (×1/×2/×4/×8) move a cursor
+through the captured window, and the alert list plus service events re-render at that cursor
+rather than at now. Navigation is redundant on purpose, because an investigation starts from a
+time the researcher already knows: ±5 min steps, **±1 h / ±3 h** period jumps, and a **jump to**
+field for an exact date and time — the storm-hit-at-09:40 case. The **window** selector (30 min,
+1 h, 3 h) says how much history counts as "around" the cursor, and it sizes both the alert and
+event context and every trend chart, so a three-hour temperature investigation is one click
+instead of stitched together by hand.
 
 ### The look: a habitat window onto Mars
 
@@ -211,8 +217,9 @@ services ----------> MQTT client (one)  ----------> | ingest rules (pure, tested
 | `lib/ingest-rules.ts` | Pure decisions: what to keep, how to timestamp it, how an alert event is shaped |
 | `lib/mqtt-worker.ts` | The only MQTT owner: subscribe, batch, flush, reconnect, command/ack correlation, alert rules that need a clock |
 | `lib/alerts.ts` | Alert lifecycle: raise/dedupe/escalate/acknowledge/resolve, audit log |
+| `lib/alert-auth.ts` | Entitlement for acting on an alert: the researcher code is checked against the alert's own service, refusals are audited |
 | `lib/alert-guidance.ts` | Cause and operator guidance per alert type (the "what do I do now" text) |
-| `lib/snapshot.ts` | Replay read model: newest sample per topic at T, alert status at T, events around T |
+| `lib/snapshot.ts` | Replay read model: newest sample per topic at T, alert status at T, events and trend windows around T |
 | `lib/{rta,mhe,opg}-selectors.ts` | Service view models: derived measures, comparisons, derived alerts |
 | `lib/controls.ts` | Control catalogue per service plus value validation (the same rules the API enforces) |
 | `lib/presets.ts` | Researcher workflows as ordered multi-step presets |
@@ -293,7 +300,7 @@ Derived and aggregated measures (`lib/*-selectors.ts`, each covered by tests):
 | Is a hot dish about to drop out? | Hottest dish vs the warn/critical limits from `/v1/alert-limits` |
 | Did the scan succeed? | Scan progress, samples received vs expected, sensitivity trend |
 | Is the habitat air breathable? | O2/CO2 margin per room, stale-telemetry detection |
-| Has a crew member crossed a clinical line? | Heart-rate and SpO2 thresholds, survey currency |
+| Has a crew member crossed a clinical line? | Heart-rate and SpO2 thresholds, survey currency, and a vitals stream that has gone quiet |
 | Can the plant carry the load without diesel? | Aggregated generation vs demand, reserve shortfall, solar share |
 | Is it safe to point the dishes now? | The array's own wind-stow state, its release threshold and the hot-dish count |
 
@@ -333,11 +340,20 @@ service as the resolver, rather than inventing an operator. The four lifecycle s
 (raised, acknowledged, resolved, plus the audit entry) are therefore always attributable to
 whoever actually did the thing.
 
+Each alert belongs to one service (or the platform), and so does the entitlement to act on it:
+`authoriseAlertAction` (`lib/alert-auth.ts`) resolves the alert's own service and checks the
+researcher code against that experiment **before** the lifecycle runs. A code cleared for RTA
+is refused on an OPG alert with 403 `researcher_not_permitted`, the alert is left untouched,
+and the refusal is written to `AuditLog` as `ALERT_DENIED` — an attempt is evidence too. The
+gate fails open only when the ARL API is unreachable, and says so in the response.
+
 `GET /api/alerts` is the log; `POST /api/alerts/{id}/acknowledge` and `/resolve` are the two
 transitions. The annunciator is on every page (including the overview), sorts by severity,
 and shows cause, value/limit and the suggested action inline, so a researcher arriving mid
 incident does not have to open the log to decide what to do. `/alerts` is the searchable log
-with the audit trail alongside.
+with the audit trail alongside, plus an **Operator action trail** panel reading `/api/audit`:
+acknowledgements, resolutions, refusals and commands with the identity and platform-clock time
+that made them.
 
 Exercised against the live lab: an RTA calibration alert was acknowledged as `Person A` at
 `12:32:04`, then resolved as `Person A` at the same instant with the note "Recalibration
@@ -348,10 +364,10 @@ transition is refused with 409/422.
 
 ## 8. Replay
 
-`GET /api/replay?timestamp=<iso|epoch-ms>&service=RTA` returns the newest sample of **every**
-topic at or before the cursor (one SQLite window-function query, not a client-side scan),
-plus the alerts that were live at that instant, plus the events in the 30 minutes before it.
-`bounds=1` returns the captured window for the scrubber.
+`GET /api/replay?timestamp=<iso|epoch-ms>&windowMinutes=<5…720>&service=RTA` returns the
+newest sample of **every** topic at or before the cursor (one SQLite window-function query, not
+a client-side scan), plus the alerts that were live at that instant, plus the events and alerts
+in the window before it. `bounds=1` returns the captured window for the scrubber.
 
 Because the replayed state is assembled from the platform's own `Telemetry` rows, replay works
 for data the platform captured — not the services' backlog dump — and it covers all four
@@ -361,6 +377,14 @@ acknowledged in the replay of that moment.
 
 The platform clock is `max(latest sample, wall clock)`: the exam services run an accelerated
 timeline ahead of wall time, and defaulting the cursor to wall clock would show an empty lab.
+
+Charts follow the same cursor: `GET /api/telemetry/history?topic=…&minutes=…&until=<iso>` anchors
+its window to the replay cursor instead of the newest sample, so the trend describes the moment
+being replayed. The RTA console uses it for the dish-temperature panel (with the Δ over the
+window — the three-hour storm investigation) and OPG for the plant power history. When a window
+is empty because it reaches back further than the capture does, the response carries the topic's
+recorded range and the panel says so ("dish-001 has been recorded from …") instead of leaving an
+unexplained blank chart.
 
 ---
 
@@ -447,7 +471,7 @@ broker does not distribute our publishes (section 3).
 npm test
 ```
 
-Five files, 97 tests, all pure or against a throwaway SQLite database created by
+Five files, 100 tests, all pure or against a throwaway SQLite database created by
 `tests/global-setup.ts` (`prisma db push` into a temp file), so the suite never touches the
 captured lab data and needs no broker:
 
@@ -455,8 +479,8 @@ captured lab data and needs no broker:
 | --- | --- |
 | `tests/topics.test.ts` (15) | Topic parsing for every kind, prefix and case handling, builders, `stateValue`/`stateAt` |
 | `tests/ingest-rules.test.ts` (20) | Payload parsing (object/scalar/array/raw/oversize), timestamp acceptance and re-stamping, alert-event shaping, scan-context geometry |
-| `tests/alert-rules.test.ts` (27) | Alert identity, cause/message prose, status normalisation, status-at-cursor, guidance, and the derived rules for RTA/MHE/OPG |
-| `tests/persistence.test.ts` (21) | Real database: replay snapshot semantics, service scoping, alert dedupe/escalation, redelivery after a restart, acknowledge, resolve (note required, ack backfilled), auto-clear, the platform clock, audit entries, replay context |
+| `tests/alert-rules.test.ts` (28) | Alert identity, cause/message prose, status normalisation, status-at-cursor, guidance, and the derived rules for RTA/MHE/OPG including a crew member's vitals going silent |
+| `tests/persistence.test.ts` (23) | Real database: replay snapshot semantics, cursor-bounded trend windows, per-topic recording range, service scoping, alert dedupe/escalation, redelivery after a restart, acknowledge, resolve (note required, ack backfilled), auto-clear, the platform clock, audit entries, replay context |
 | `tests/catalogue.test.ts` (14) | Control catalogue and preset invariants: unique per service, every preset step resolves and validates, MHE setpoint bounds, enum/object validation, plant-command entity pinning |
 
 **Why this strategy.** The rules that decide what is kept, what is escalated and what is
@@ -491,10 +515,10 @@ Exam rubric:
 | RTA 30% | complete | `/rta`: dish grid, scan heat map with geometry from `events/scan`, availability/sensitivity derived measures, subarray and per-dish control, observation presets |
 | MHE 17.5% | complete | `/mhe`: layout, room climate vs setpoints, crew vitals, airlock control, hydroponics water, presets, derived air-viability answer |
 | OPG 17.5% | complete | `/opg`: generation vs demand, reserve shortfall, solar share, diesel fuel, supply-mode control (read-only for this researcher code, stated in the UI) |
-| Alert system 10% | 100% | Annunciator on every page; acknowledge and resolve implemented; persistent log with raised/ack/resolve timestamps, users and cause; audit trail |
-| Replay 10% | 100% | Cursor selection, ordered playback of platform-captured data, play/pause, rewind, fast-forward, speed across all services; alerts and events re-rendered at the cursor |
-| UI/UX 2.5% | 100% | One consistent layout and navigation across services, no sign-in, alerts always visible, operator-prioritised ordering, degraded states designed (offline service, many alerts, permission denial, broker failure) |
-| Testing 2.5% | 100% | 97 tests run from this README covering parsing, alert rules, persistence and replay; strategy justified above; integration verified against the bundle with controls enabled and against the lab |
+| Alert system 10% | 100% | Annunciator on every page; acknowledge and resolve gated by the researcher's entitlement for the alert's own service; persistent log with raised/ack/resolve timestamps, users and cause; `/alerts` operator action trail |
+| Replay 10% | 100% | Cursor selection, ordered playback of platform-captured data, play/pause, rewind, fast-forward, speed, ±1 h/±3 h period jumps and jump-to-time across all services; 30 min/1 h/3 h window shared by alerts, events and trend charts; alerts, events and charts re-rendered at the cursor |
+| UI/UX 2.5% | 100% | One consistent layout and navigation across services, no sign-in, alerts always visible, operator-prioritised ordering, degraded states designed (offline service, many alerts, permission denial, broker failure, empty replay window explained) |
+| Testing 2.5% | 100% | 100 tests run from this README covering parsing, alert rules, persistence and replay; strategy justified above; integration verified against the bundle with controls enabled and against the lab |
 | Architecture 5% | 100% | Starts from this README; every endpoint, credential and path is an environment variable; modular (`lib/*`); shared shell, persistence and alert system reused; services plug in through the topic contract (section 5); batching, back pressure, reconnection and retention are reasoned |
 | Security 5% | 100% | Codes resolved via the ARL API per service, services access protected, ack/resolve attributed in `Alert` and `AuditLog`, decisions reasoned, no hard-coded credentials, input validated on every route |
 
