@@ -1,0 +1,155 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-console-void text-console-ink antialiased;
+  background-image:
+    radial-gradient(circle at 12% -10%, rgba(56, 242, 195, 0.08), transparent 45%),
+    radial-gradient(circle at 88% 0%, rgba(103, 182, 255, 0.07), transparent 42%),
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: auto, auto, 32px 32px, 32px 32px;
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-console-edge bg-console-panel/85 shadow-panel backdrop-blur;
+  }
+
+  .panel-header {
+    @apply flex flex-wrap items-center justify-between gap-3 border-b border-console-edge/70 px-4 py-3;
+  }
+
+  .panel-title {
+    @apply text-[11px] font-semibold uppercase tracking-[0.18em] text-console-muted;
+  }
+
+  .metric-value {
+    @apply font-mono text-2xl font-semibold tabular-nums tracking-tight text-console-ink;
+  }
+
+  .metric-label {
+    @apply text-[10px] font-semibold uppercase tracking-[0.16em] text-console-muted;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-console-edge bg-console-grid/60 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-console-ink transition-colors hover:border-console-signal/60 hover:text-console-signal focus:outline-none focus-visible:ring-2 focus-visible:ring-console-signal/60 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply border-console-signal/70 bg-console-signal/15 text-console-signal hover:bg-console-signal/25;
+  }
+
+  .btn-danger {
+    @apply border-console-alert/60 bg-console-alert/10 text-console-alert hover:border-console-alert hover:bg-console-alert/20;
+  }
+
+  .btn-warn {
+    @apply border-console-warn/60 bg-console-warn/10 text-console-warn hover:border-console-warn hover:bg-console-warn/20;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-console-edge bg-console-void/70 px-3 py-1.5 font-mono text-sm text-console-ink placeholder:text-console-muted/60 focus:border-console-signal/70 focus:outline-none focus:ring-1 focus:ring-console-signal/40;
+  }
+
+  .label {
+    @apply mb-1 block text-[10px] font-semibold uppercase tracking-[0.16em] text-console-muted;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.12em];
+  }
+
+  .table-cell {
+    @apply whitespace-nowrap px-3 py-1.5 font-mono text-xs tabular-nums;
+  }
+
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #243044 transparent;
+  }
+
+  .scroll-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background-color: #243044;
+    border-radius: 999px;
+  }
+}
+
+/* Range input styling for the replay scrubber. */
+input[type="range"].scrubber {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 26px;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].scrubber::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #1c2533, #243044);
+  border: 1px solid #1c2533;
+}
+
+input[type="range"].scrubber::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #1c2533;
+  border: 1px solid #1c2533;
+}
+
+input[type="range"].scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -5px;
+  height: 16px;
+  width: 16px;
+  border-radius: 999px;
+  background: #38f2c3;
+  border: 2px solid #05070d;
+  box-shadow: 0 0 12px rgba(56, 242, 195, 0.7);
+}
+
+input[type="range"].scrubber::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border-radius: 999px;
+  background: #38f2c3;
+  border: 2px solid #05070d;
+  box-shadow: 0 0 12px rgba(56, 242, 195, 0.7);
+}
+
+input[type="range"].scrubber:disabled::-webkit-slider-thumb {
+  background: #3c4a5e;
+  box-shadow: none;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.blink {
+  animation: blink 1.6s ease-in-out infinite;
+}

@@ -1,0 +1,505 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { fetchPowerHistory } from "@/lib/api-client";
+import { formatNumber, formatTime, timeAgo, titleCase } from "@/lib/format";
+import {
+  computeTotals,
+  deriveOpgAlerts,
+  getPower,
+  getSources,
+  toTrendPoint,
+  type TrendPoint,
+} from "@/lib/opg-selectors";
+import { useTelemetry } from "@/lib/telemetry-store";
+import {
+  OPG_BATTERY_CRITICAL_PCT,
+  OPG_DIESEL_LOW_FUEL_PCT,
+  type PowerSource,
+} from "@/lib/types";
+import { useCommandRunner } from "@/lib/use-command";
+import { useNow } from "@/lib/use-now";
+import { useOperator } from "@/lib/use-operator";
+import { AlertAnnunciator } from "../AlertAnnunciator";
+import { ReplayBar } from "../ReplayBar";
+import { Badge, EmptyState, Metric, Panel, ProgressBar, StatusDot } from "../ui";
+import { Gauge } from "./Gauge";
+
+const INVERTER_TONE: Record<string, "ok" | "warn" | "alert" | "neutral"> = {
+  ONLINE: "ok",
+  STANDBY: "warn",
+  OFFLINE: "alert",
+  FAULT: "alert",
+};
+
+const SOURCE_LABEL: Record<PowerSource, string> = {
+  SOLAR: "Solar array",
+  BATTERY: "Battery bank",
+  DIESEL: "Diesel generators",
+};
+
+export function OPGView() {
+  const { topics, mode, lastTelemetryAt } = useTelemetry();
+  const { operator, setOperator } = useOperator();
+  const { run, pending, feedback } = useCommandRunner();
+  const now = useNow(30_000);
+
+  const power = useMemo(() => getPower(topics), [topics]);
+  const state = power?.state ?? null;
+  const totals = useMemo(() => computeTotals(state), [state]);
+  const sources = useMemo(() => getSources(topics), [topics]);
+  const derivedAlerts = useMemo(() => deriveOpgAlerts(state, totals), [state, totals]);
+
+  const [trend, setTrend] = useState<TrendPoint[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetchPowerHistory(60);
+        if (cancelled) return;
+        setTrend(
+          response.samples
+            .map((sample) => toTrendPoint(sample.payload, sample.timestamp))
+            .filter((point) => Number.isFinite(point.t))
+            .sort((a, b) => a.t - b.t)
+            .slice(-360),
+        );
+        setHistoryError(null);
+      } catch (caught) {
+        if (!cancelled) setHistoryError(caught instanceof Error ? caught.message : String(caught));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const powerTimestamp = power?.timestamp ?? null;
+  useEffect(() => {
+    if (!power) return;
+    const point = toTrendPoint(power.state as unknown as Record<string, unknown>, power.timestamp);
+    setTrend((previous) => {
+      const next = [...previous.filter((entry) => entry.t !== point.t), point].sort((a, b) => a.t - b.t);
+      return next.slice(-360);
+    });
+  }, [power?.timestamp, power]);
+
+  const activeSource = (state?.activeSource ?? "").toString().toUpperCase() as PowerSource | "";
+  const inverterStatus = (state?.inverterStatus ?? "").toString().toUpperCase();
+  const loadPct =
+    totals.demandKw > 0 ? Math.min((totals.producedKw / totals.demandKw) * 100, 200) : null;
+  const solarShare = totals.producedKw > 0 ? (totals.solarKw / totals.producedKw) * 100 : null;
+
+  const issue = (action: string, payload: Record<string, unknown>, label: string) =>
+    run({ service: "OPG", action, issuedBy: operator, ...payload }, label);
+
+  return (
+    <div className="space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-console-signal">
+            Service 03 · On-Demand Power Generation
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-console-ink">
+            Plant generation & load control
+          </h1>
+          <p className="mt-1 max-w-2xl text-sm text-console-muted">
+            Solar, battery store and diesel backup for the whole laboratory, with source switching and
+            load-shedding authority.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={totals.deficitKw > 0 ? "alert" : "ok"}>
+            <StatusDot tone={totals.deficitKw > 0 ? "alert" : "ok"} pulse={totals.deficitKw > 0} />
+            {totals.deficitKw > 0 ? `${formatNumber(totals.deficitKw, 1)} kW deficit` : "demand covered"}
+          </Badge>
+          <Badge tone="info">source {activeSource || "—"}</Badge>
+          {state?.loadShedding && <Badge tone="warn">load shedding</Badge>}
+          <Badge tone="neutral">last telemetry {lastTelemetryAt ? timeAgo(lastTelemetryAt, now) : "—"}</Badge>
+          {mode === "replay" && <Badge tone="warn">historical view</Badge>}
+        </div>
+      </header>
+
+      <ReplayBar service="OPG" />
+
+      {derivedAlerts.length > 0 && (
+        <div className="panel border-console-warn/40 bg-console-warn/5 px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            {derivedAlerts.map((alert) => (
+              <span
+                key={alert.message}
+                className={`flex items-center gap-2 text-xs ${
+                  alert.tone === "alert" ? "text-console-alert" : "text-console-warn"
+                }`}
+              >
+                <StatusDot tone={alert.tone} pulse />
+                {alert.message}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <Panel
+        title="Power generation overview"
+        subtitle={`Aggregated plant state ${power ? `updated ${timeAgo(power.timestamp, now)}` : "— no telemetry"}`}
+        actions={
+          <Badge tone={INVERTER_TONE[inverterStatus] ?? "neutral"}>
+            inverter {inverterStatus || "unknown"}
+          </Badge>
+        }
+      >
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          <Metric
+            label="Total produced"
+            value={formatNumber(totals.producedKw, 1)}
+            unit="kW"
+            hint={`${formatNumber(totals.demandKw, 1)} kW consumed`}
+            tone={totals.deficitKw > 0 ? "alert" : "ok"}
+          />
+          <Metric
+            label="Solar output"
+            value={formatNumber(totals.solarKw, 1)}
+            unit="kW"
+            hint={
+              state?.solarCapacityKw
+                ? `of ${formatNumber(state.solarCapacityKw, 0)} kW · ${formatNumber(solarShare, 0)}% share`
+                : `share ${formatNumber(solarShare, 0)}%`
+            }
+            tone={state?.solarEnabled === false ? "warn" : "neutral"}
+          />
+          <Metric
+            label="Battery reserve"
+            value={formatNumber(totals.batteryPct, 1)}
+            unit="%"
+            hint={`${formatNumber(Math.abs(totals.batteryKw), 1)} kW ${totals.batteryKw >= 0 ? "discharge" : "charge"}`}
+            tone={
+              totals.batteryPct !== null && totals.batteryPct <= OPG_BATTERY_CRITICAL_PCT ? "alert" : "neutral"
+            }
+          />
+          <Metric
+            label="Diesel output"
+            value={formatNumber(totals.dieselKw, 1)}
+            unit="kW"
+            hint={state?.dieselRunning ? "generator running" : "generator stopped"}
+            tone={state?.dieselRunning ? "warn" : "neutral"}
+          />
+          <Metric
+            label="Diesel fuel"
+            value={formatNumber(totals.fuelPct, 1)}
+            unit="%"
+            tone={totals.fuelPct !== null && totals.fuelPct <= OPG_DIESEL_LOW_FUEL_PCT ? "alert" : "neutral"}
+          />
+          <Metric
+            label="Load shedding"
+            value={state?.loadShedding ? "ENGAGED" : "NORMAL"}
+            hint={state?.shedLoadKw ? `${formatNumber(state.shedLoadKw, 1)} kW shed` : "no loads shed"}
+            tone={state?.loadShedding ? "warn" : "ok"}
+          />
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <span className="text-[10px] uppercase tracking-[0.14em] text-console-muted">Demand coverage</span>
+          <div className="min-w-[180px] flex-1">
+            <ProgressBar
+              value={loadPct ?? 0}
+              max={100}
+              tone={totals.deficitKw > 0 ? "alert" : (loadPct ?? 0) > 90 ? "warn" : "ok"}
+            />
+          </div>
+          <span className="font-mono text-[11px] text-console-ink">{formatNumber(loadPct, 0)}%</span>
+        </div>
+      </Panel>
+
+      <div className="grid gap-4 xl:grid-cols-3">
+        <div className="space-y-4 xl:col-span-2">
+          <Panel
+            title="Generation vs demand"
+            subtitle="Last 60 minutes of aggregated plant samples."
+            actions={
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-console-muted">
+                <span className="text-console-solar">solar</span>
+                <span className="text-console-warn">diesel</span>
+                <span className="text-console-info">demand</span>
+              </div>
+            }
+          >
+            <div className="h-56 w-full">
+              {trend.length === 0 ? (
+                <EmptyState
+                  message="No power history yet."
+                  hint={historyError ?? "Samples are recorded as soon as the OPG controller publishes."}
+                />
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={trend} margin={{ top: 6, right: 8, bottom: 0, left: -18 }}>
+                    <CartesianGrid stroke="#1c2533" strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="t"
+                      type="number"
+                      domain={["dataMin", "dataMax"]}
+                      scale="time"
+                      tickFormatter={(value) => formatTime(new Date(Number(value)).toISOString())}
+                      stroke="#7d8ca3"
+                      tick={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
+                      minTickGap={28}
+                    />
+                    <YAxis
+                      stroke="#7d8ca3"
+                      tick={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
+                      width={48}
+                      unit=" kW"
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        background: "#0b1018",
+                        border: "1px solid #1c2533",
+                        borderRadius: 8,
+                        fontSize: 11,
+                      }}
+                      labelFormatter={(value) => formatTime(new Date(Number(value)).toISOString())}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="solarKw"
+                      name="Solar kW"
+                      stroke="#ffd166"
+                      fill="#ffd166"
+                      fillOpacity={0.18}
+                      strokeWidth={1.5}
+                      isAnimationActive={false}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="dieselKw"
+                      name="Diesel kW"
+                      stroke="#ffab4a"
+                      fill="#ffab4a"
+                      fillOpacity={0.14}
+                      strokeWidth={1.5}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="demandKw"
+                      name="Demand kW"
+                      stroke="#67b6ff"
+                      strokeWidth={1.5}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+            <p className="mt-2 text-[10px] uppercase tracking-[0.12em] text-console-muted">
+              current sample {power?.timestamp ? formatTime(power.timestamp) : "—"} · {trend.length} points
+            </p>
+          </Panel>
+
+          <Panel
+            title="Source status"
+            subtitle="Per-source controller heartbeats published on arl/opg/source/+/status."
+          >
+            {sources.length === 0 ? (
+              <EmptyState message="No per-source status yet." hint="Derived totals from the aggregated power topic are still shown above." />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-left">
+                  <thead>
+                    <tr className="border-b border-console-edge/70 text-[10px] uppercase tracking-[0.14em] text-console-muted">
+                      <th className="table-cell">Source</th>
+                      <th className="table-cell">State</th>
+                      <th className="table-cell">Output</th>
+                      <th className="table-cell">Updated</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sources.map((source) => (
+                      <tr key={source.source} className="border-b border-console-edge/40 last:border-b-0">
+                        <td className="table-cell text-console-ink">{titleCase(source.source)}</td>
+                        <td className="table-cell">
+                          <Badge tone={source.online ? "ok" : "alert"}>{source.online ? "online" : "offline"}</Badge>
+                        </td>
+                        <td className="table-cell">{formatNumber(source.outputKw, 1)} kW</td>
+                        <td className="table-cell text-console-muted">{timeAgo(source.timestamp, now)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="Source mix" subtitle="Contribution of each generator to the current output.">
+            <div className="space-y-2">
+              {[
+                { label: "Solar array", value: Math.max(totals.solarKw, 0), tone: "signal" as const },
+                { label: "Diesel generators", value: Math.max(totals.dieselKw, 0), tone: "warn" as const },
+                { label: "Battery discharge", value: Math.max(totals.batteryKw, 0), tone: "info" as const },
+              ].map((row) => (
+                <div key={row.label} className="flex items-center gap-2">
+                  <span className="w-36 text-[10px] uppercase tracking-[0.12em] text-console-muted">{row.label}</span>
+                  <div className="flex-1">
+                    <ProgressBar value={row.value} max={Math.max(totals.producedKw, 1)} tone={row.tone} />
+                  </div>
+                  <span className="w-16 text-right font-mono text-[11px] text-console-ink">
+                    {formatNumber(row.value, 1)} kW
+                  </span>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        </div>
+
+        <div className="space-y-4">
+          <Panel title="Reserve & generation gauges" subtitle="Battery, load coverage and fuel reserve.">
+            <div className="grid grid-cols-2 gap-2">
+              <Gauge
+                value={totals.batteryPct}
+                label="Battery"
+                tone={
+                  totals.batteryPct !== null && totals.batteryPct <= OPG_BATTERY_CRITICAL_PCT ? "alert" : "signal"
+                }
+                caption="reserve capacity"
+              />
+              <Gauge
+                value={loadPct}
+                max={150}
+                unit="%"
+                label="Coverage"
+                tone={totals.deficitKw > 0 ? "alert" : "ok"}
+                caption="demand covered"
+              />
+              <Gauge
+                value={totals.fuelPct}
+                label="Fuel"
+                tone={totals.fuelPct !== null && totals.fuelPct <= OPG_DIESEL_LOW_FUEL_PCT ? "alert" : "warn"}
+                caption="diesel reserve"
+              />
+              <Gauge value={solarShare} label="Solar" tone="solar" caption="share of output" />
+            </div>
+          </Panel>
+
+          <Panel title="Power controls" subtitle="Commands are published to arl/opg/cmd/… and audited.">
+            <div className="space-y-3">
+              <div>
+                <label className="label" htmlFor="opg-operator">
+                  Operator
+                </label>
+                <input
+                  id="opg-operator"
+                  className="input"
+                  value={operator}
+                  onChange={(event) => setOperator(event.target.value)}
+                  placeholder="Researcher name / ID"
+                />
+              </div>
+
+              <div>
+                <span className="label">Default power source</span>
+                <div className="grid grid-cols-3 gap-1">
+                  {(Object.keys(SOURCE_LABEL) as PowerSource[]).map((source) => (
+                    <button
+                      key={source}
+                      type="button"
+                      className={`btn ${activeSource === source ? "btn-primary" : ""}`}
+                      disabled={pending !== null}
+                      onClick={() =>
+                        void issue("source.select", { source }, `Switch to ${SOURCE_LABEL[source]}`)
+                      }
+                    >
+                      {source}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  className={`btn ${state?.loadShedding ? "btn-warn" : ""}`}
+                  disabled={pending !== null || state?.loadShedding === true}
+                  onClick={() => void issue("loadShedding.enable", {}, "Engage load shedding")}
+                >
+                  Shed loads
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={pending !== null || state?.loadShedding !== true}
+                  onClick={() => void issue("loadShedding.disable", {}, "Release load shedding")}
+                >
+                  Release loads
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={pending !== null || state?.solarEnabled === true}
+                  onClick={() => void issue("solar.enable", {}, "Enable solar array")}
+                >
+                  Enable solar
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-warn"
+                  disabled={pending !== null || state?.solarEnabled === false}
+                  onClick={() => void issue("solar.disable", {}, "Disable solar array")}
+                >
+                  Disable solar
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={pending !== null || state?.dieselRunning === true}
+                  onClick={() => void issue("diesel.start", {}, "Start diesel generator")}
+                >
+                  Start diesel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  disabled={pending !== null || state?.dieselRunning !== true}
+                  onClick={() => void issue("diesel.stop", {}, "Stop diesel generator")}
+                >
+                  Stop diesel
+                </button>
+              </div>
+
+              {feedback && (
+                <p
+                  className={`rounded-md border px-2.5 py-1.5 text-[11px] ${
+                    feedback.tone === "ok"
+                      ? "border-console-ok/40 bg-console-ok/10 text-console-ok"
+                      : "border-console-alert/50 bg-console-alert/10 text-console-alert"
+                  }`}
+                >
+                  {feedback.text}
+                </p>
+              )}
+
+              <p className="text-[10px] text-console-muted">
+                Solar {state?.solarEnabled === false ? "disabled" : "enabled"} · diesel{" "}
+                {state?.dieselRunning ? "running" : "stopped"} · inverter {inverterStatus || "unknown"}
+              </p>
+            </div>
+          </Panel>
+
+          <AlertAnnunciator title="OPG alerts" maxHeight="max-h-[420px]" />
+        </div>
+      </div>
+    </div>
+  );
+}

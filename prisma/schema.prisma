@@ -1,0 +1,56 @@
+// Astro-Research Laboratory platform data model.
+// SQLite does not support native enums, so bounded value sets are stored as
+// strings and validated in the application layer (lib/types.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Raw or derived telemetry sample ingested from the MQTT broker.
+/// `service` is one of RTA | MHE | OPG, `payload` holds a JSON string.
+model Telemetry {
+  id        String   @id @default(uuid())
+  service   String
+  topic     String
+  payload   String
+  timestamp DateTime @default(now())
+
+  @@index([service, timestamp])
+  @@index([topic, timestamp])
+  @@index([timestamp])
+}
+
+/// Operational alert raised by ingestion rules or explicit payload flags.
+/// `status` is one of ACTIVE | ACKNOWLEDGED | RESOLVED.
+model Alert {
+  id             String    @id @default(uuid())
+  service        String
+  alertType      String
+  message        String
+  status         String    @default("ACTIVE")
+  timestamp      DateTime  @default(now())
+  acknowledgedBy String?
+  acknowledgedAt DateTime?
+  resolvedBy     String?
+  resolvedAt     DateTime?
+  resolutionNote String?
+
+  @@index([status, service])
+  @@index([timestamp])
+}
+
+/// Immutable trail of operator actions against the platform.
+model AuditLog {
+  id          String   @id @default(uuid())
+  action      String
+  performedBy String
+  details     String
+  timestamp   DateTime @default(now())
+
+  @@index([timestamp])
+}
