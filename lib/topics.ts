@@ -142,5 +142,3 @@ export function telemetryTopic(
 export function eventTopic(prefix: string, service: IngestService, kind: string): string {
   return `${prefix}/${service.toLowerCase()}/events/${kind}`;
 }
-
-export const SERVICE_VALUES = ["RTA", "MHE", "OPG"] as const;

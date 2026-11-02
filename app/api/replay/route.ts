@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getLatestSampleAt, getSnapshot, getTelemetryBounds } from "@/lib/snapshot";
+import { getLatestSampleAt, getReplayContext, getSnapshot, getTelemetryBounds } from "@/lib/snapshot";
 import { toService } from "@/lib/types";
 
 /**
@@ -10,7 +10,9 @@ import { toService } from "@/lib/types";
  *   GET /api/replay?bounds=1&service=RTA           (scrubber bounds)
  *
  * Returns the latest sample of every topic at or before `timestamp`, grouped
- * by topic so the dashboards can re-render a full instrument state.
+ * by topic so the dashboards can re-render a full instrument state — plus the
+ * alerts that were live at that instant and the service events around it, so
+ * replay is integrated with the alert system rather than chart-only.
  */
 
 export const runtime = "nodejs";
@@ -45,9 +47,15 @@ export async function GET(request: NextRequest) {
     const latest = rawTimestamp ? null : await getLatestSampleAt(service);
     const fallback = latest && latest.getTime() > Date.now() ? latest : new Date();
     const target = parseTimestamp(rawTimestamp) ?? fallback;
-    const snapshot = await getSnapshot(target, service);
+    const [snapshot, context] = await Promise.all([
+      getSnapshot(target, service),
+      getReplayContext(target, service),
+    ]);
 
-    return NextResponse.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(
+      { ...snapshot, context },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (error) {
     console.error("[replay] snapshot query failed:", error);
     return NextResponse.json(

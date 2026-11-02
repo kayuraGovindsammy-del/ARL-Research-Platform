@@ -22,6 +22,7 @@ import type {
   CommandAck,
   CommandResult,
   MheCrewSurvey,
+  ReplayContext,
   ReplaySnapshot,
   Service,
   TelemetryEvent,
@@ -88,6 +89,11 @@ export interface TelemetryStoreValue {
   commands: CommandResult[];
   alerts: AlertRecord[];
   counts: Record<AlertStatus, number>;
+  /**
+   * Alerts and service events as they stood at the replay cursor. Null while
+   * live — the annunciator then shows the live alert table instead.
+   */
+  replayContext: ReplayContext | null;
   alertsLoading: boolean;
   connection: ConnectionState;
   brokerState: string | null;
@@ -118,6 +124,13 @@ function upsertAlert(list: AlertRecord[], alert: AlertRecord): AlertRecord[] {
     .slice(0, MAX_ALERTS);
 }
 
+/** Tally a set of alerts by lifecycle state (used for replayed alert state). */
+function countAlerts(list: AlertRecord[]): Record<AlertStatus, number> {
+  const totals: Record<AlertStatus, number> = { ACTIVE: 0, ACKNOWLEDGED: 0, RESOLVED: 0 };
+  for (const alert of list) totals[alert.status] += 1;
+  return totals;
+}
+
 export function TelemetryProvider({
   service,
   children,
@@ -140,6 +153,7 @@ export function TelemetryProvider({
   const [acks, setAcks] = useState<CommandAck[]>([]);
   const [commands, setCommands] = useState<CommandResult[]>([]);
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
+  const [replayContext, setReplayContext] = useState<ReplayContext | null>(null);
   const [counts, setCounts] = useState<Record<AlertStatus, number>>({
     ACTIVE: 0,
     ACKNOWLEDGED: 0,
@@ -202,6 +216,9 @@ export function TelemetryProvider({
     setCommands([]);
     setConnection("connecting");
     setError(null);
+    // Leaving replay restores the live alert table.
+    setReplayContext(null);
+    void loadAlerts();
 
     const hydrate = async () => {
       try {
@@ -334,7 +351,7 @@ export function TelemetryProvider({
       cancelled = true;
       source.close();
     };
-  }, [mode, service, scheduleAlertRefresh]);
+  }, [mode, service, scheduleAlertRefresh, loadAlerts]);
 
   // --- Replay transport: snapshot per cursor position ---------------------
   useEffect(() => {
@@ -357,6 +374,16 @@ export function TelemetryProvider({
         if (cancelled) return;
         setTopics(snapshot.topics);
         setStream([]);
+        // Replay is integrated with the alert system: the annunciator shows the
+        // alerts that were live at this instant, and the event strip shows the
+        // scan/survey/refuel events around it.
+        const context = snapshot.context ?? null;
+        setReplayContext(context);
+        if (context) {
+          setAlerts(context.activeAlerts);
+          setCounts(countAlerts(context.activeAlerts));
+          setEvents(context.events);
+        }
         setError(null);
       } catch (caught) {
         if (cancelled || (caught as Error)?.name === "AbortError") return;
@@ -523,6 +550,7 @@ export function TelemetryProvider({
       commands,
       alerts,
       counts,
+      replayContext,
       alertsLoading,
       connection,
       brokerState,
@@ -555,6 +583,7 @@ export function TelemetryProvider({
       commands,
       alerts,
       counts,
+      replayContext,
       alertsLoading,
       connection,
       brokerState,

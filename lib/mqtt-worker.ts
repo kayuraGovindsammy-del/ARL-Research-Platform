@@ -1,5 +1,5 @@
 import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
-import { clearServiceAlert, raiseServiceAlert, type ServiceAlertEvent } from "./alerts";
+import { clearServiceAlert, raiseServiceAlert } from "./alerts";
 import { env, mqttBrokerUrl } from "./env";
 import {
   publishAck,
@@ -8,9 +8,16 @@ import {
   publishTelemetry,
   publishWorkerStatus,
 } from "./events";
+import {
+  parsePayload,
+  resolveTimestamp,
+  RETENTION_MS,
+  str,
+  toAlertEvent,
+  toScanContext,
+} from "./ingest-rules";
 import { prisma, withDbRetry } from "./prisma";
-import { scanTargetLabel } from "./rta-selectors";
-import { commandTopic, parseTopic, telemetryWildcard } from "./topics";
+import { ackTopic, commandTopic, parseTopic, telemetryWildcard } from "./topics";
 import type {
   CommandAck,
   CommandOutcome,
@@ -61,11 +68,9 @@ export interface WorkerStatus {
   startedAt: string | null;
 }
 
-const MAX_PAYLOAD_BYTES = 256 * 1024;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 const STALE_TICK_MS = 60_000;
-const RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 15 * 60 * 1000;
 
 /** A service that has published nothing for this long is considered silent. */
@@ -90,95 +95,6 @@ interface PendingSample {
   topic: string;
   payload: string;
   timestamp: Date;
-}
-
-function parsePayload(buffer: Buffer): Record<string, unknown> | null {
-  if (buffer.length > MAX_PAYLOAD_BYTES) return null;
-  const text = buffer.toString("utf8").trim();
-  if (!text) return {};
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return { value: parsed };
-  } catch {
-    // Non-JSON telemetry is still valuable for replay: keep the raw text.
-    return { raw: text };
-  }
-}
-
-/**
- * The services stamp `ts` (ms since epoch). Keeping it makes replay reflect the
- * lab clock instead of our receive time, but bogus values are rejected.
- */
-function resolveTimestamp(payload: Record<string, unknown>, now: Date): Date {
-  const candidate = payload.ts ?? payload.timestamp;
-  if (typeof candidate === "number" && Number.isFinite(candidate)) {
-    const value = candidate > 1e12 ? candidate : candidate * 1000;
-    const date = new Date(value);
-    if (Math.abs(date.getTime() - now.getTime()) < RETENTION_MS) return date;
-  }
-  if (typeof candidate === "string" && candidate.trim()) {
-    const date = new Date(candidate);
-    if (!Number.isNaN(date.getTime()) && Math.abs(date.getTime() - now.getTime()) < RETENTION_MS) {
-      return date;
-    }
-  }
-  return now;
-}
-
-function num(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function str(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function toAlertEvent(payload: Record<string, unknown>): ServiceAlertEvent | null {
-  const alertId = str(payload.alert_id);
-  const type = str(payload.type);
-  const state = str(payload.state);
-  if (!alertId || !type || !state) return null;
-  return {
-    alertId,
-    type,
-    state,
-    severity: str(payload.severity) ?? "warning",
-    value: num(payload.value),
-    limit: num(payload.limit),
-    unit: str(payload.unit),
-    message: str(payload.message),
-    entity: str(payload.entity),
-    metadata:
-      payload.metadata && typeof payload.metadata === "object"
-        ? (payload.metadata as Record<string, unknown>)
-        : undefined,
-  };
-}
-
-function toScanContext(payload: Record<string, unknown>, at: Date): RtaScanContext | null {
-  if (str(payload.event) !== "started") return null;
-  const scanId = str(payload.scan_id);
-  const ra = num(payload.ra_rad);
-  const dec = num(payload.dec_rad);
-  const fov = num(payload.fov_rad);
-  if (!scanId || ra === null || dec === null || fov === null) return null;
-  return {
-    scanId,
-    target: scanTargetLabel(payload),
-    raRad: ra,
-    decRad: dec,
-    fovRad: fov,
-    bandHz: num(payload.band_hz) ?? 0,
-    gridSize: num(payload.grid_size) ?? 128,
-    overlap: num(payload.overlap) ?? 3,
-    dishes: Array.isArray(payload.dishes) ? payload.dishes.map((id) => String(id)) : [],
-    expectedDurationS: num(payload.expected_duration_s) ?? 0,
-    origin: str(payload.origin) ?? "command",
-    startedAt: at.toISOString(),
-  };
 }
 
 class MqttWorker {
@@ -411,7 +327,9 @@ class MqttWorker {
       if (!alertEvent) return;
       this.enqueue("alert event", async () => {
         if (alertEvent.state === "cleared") {
-          const cleared = await clearServiceAlert(service, alertEvent);
+          // The clear carries the service's own timestamp, so the lifecycle stays
+          // on the lab clock and a replay of the interval shows the alert closed.
+          const cleared = await clearServiceAlert(service, alertEvent, new Date(timestamp));
           if (cleared) this.status.alertsRaised += 0;
           return;
         }
@@ -519,7 +437,6 @@ class MqttWorker {
   private async checkSilence(): Promise<void> {
     const now = Date.now();
     for (const [service, last] of this.lastSeen) {
-      if (service === "LWM") continue;
       if (now - last < SERVICE_SILENCE_MS) {
         this.silentSince.delete(service);
         continue;
@@ -623,7 +540,11 @@ class MqttWorker {
           ? `Service accepted the command (${ack.state}); no terminal ack within ${Math.round(
               timeoutMs / 1000,
             )}s.`
-          : `No ack from ${input.service} within ${Math.round(timeoutMs / 1000)}s.`
+          : `No ack from ${input.service} within ${Math.round(timeoutMs / 1000)}s on ${ackTopic(
+              env().MQTT_TOPIC_PREFIX,
+              input.service,
+              commandId,
+            )}. The broker accepted our publish, so nothing answered: check that this broker account may write ${env().MQTT_TOPIC_PREFIX}/${input.service.toLowerCase()}/cmd/# and that ${input.service} is running.`
         : ack?.reason
           ? `${outcome}: ${ack.reason}${ack.detail ? ` (${ack.detail})` : ""}`
           : `${outcome}${ack?.detail ? `: ${ack.detail}` : ""}`;

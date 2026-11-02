@@ -1,4 +1,6 @@
 import { prisma, withDbRetry } from "./prisma";
+import { guidanceFor } from "./alert-guidance";
+import { platformNow } from "./clock";
 import { publishAlert } from "./events";
 import { ALERT_STATUSES, type AlertRecord, type AlertStatus } from "./types";
 
@@ -10,6 +12,11 @@ import { ALERT_STATUSES, type AlertRecord, type AlertStatus } from "./types";
  * therefore encode the entity into `alertType`, e.g.
  * `RTA_DISH_OVERHEAT:D-042`, while array-wide conditions stay generic
  * (`RTA_DISH_CAPACITY_LOW`).
+ *
+ * Persistence contract (the annunciator's evidence trail): every row records
+ * the raised timestamp, the acknowledgement timestamp + user, the resolution
+ * timestamp + user, and the cause — the rule, the entity and the value that
+ * breached its limit. Acknowledging and resolving also write an AuditLog row.
  */
 
 export class AlertOperationError extends Error {
@@ -34,6 +41,13 @@ type RawAlert = {
   resolvedBy: string | null;
   resolvedAt: Date | null;
   resolutionNote: string | null;
+  cause: string | null;
+  severity: string | null;
+  entity: string | null;
+  value: number | null;
+  limitValue: number | null;
+  unit: string | null;
+  context: string | null;
 };
 
 export function toAlertRecord(alert: RawAlert): AlertRecord {
@@ -49,6 +63,13 @@ export function toAlertRecord(alert: RawAlert): AlertRecord {
     resolvedBy: alert.resolvedBy,
     resolvedAt: alert.resolvedAt ? alert.resolvedAt.toISOString() : null,
     resolutionNote: alert.resolutionNote,
+    cause: alert.cause,
+    severity: alert.severity,
+    entity: alert.entity,
+    value: alert.value,
+    limitValue: alert.limitValue,
+    unit: alert.unit,
+    context: alert.context,
   };
 }
 
@@ -85,7 +106,7 @@ export function serviceAlertType(event: ServiceAlertEvent): string {
   return `${event.type}:${event.alertId}`;
 }
 
-function formatAlertMessage(event: ServiceAlertEvent): string {
+export function formatAlertMessage(event: ServiceAlertEvent): string {
   const parts: string[] = [];
   if (event.message) parts.push(event.message);
   if (event.entity && event.entity !== "global") parts.push(event.entity);
@@ -99,8 +120,28 @@ function formatAlertMessage(event: ServiceAlertEvent): string {
 }
 
 /**
+ * The cause answers "why did this fire?", independently of the prose in
+ * `message`: the rule, the entity it applies to, and the measured value
+ * against the limit that defined it.
+ */
+export function formatAlertCause(event: ServiceAlertEvent): string {
+  const rule = event.type;
+  const target = event.entity && event.entity !== "global" ? event.entity : "the service";
+  if (typeof event.value === "number" && typeof event.limit === "number") {
+    const unit = event.unit ? ` ${event.unit}` : "";
+    const direction = event.value > event.limit ? "above" : "below";
+    return `${rule} on ${target}: ${event.value}${unit} is ${direction} the ${event.limit}${unit} limit`;
+  }
+  if (typeof event.value === "number") {
+    const unit = event.unit ? ` ${event.unit}` : "";
+    return `${rule} on ${target}: reported ${event.value}${unit}`;
+  }
+  return `${rule} on ${target}`;
+}
+
+/**
  * Persist a raised service alert. Escalations reuse the same `alert_id`, so an
- * ACTIVE row has its message refreshed instead of being duplicated.
+ * ACTIVE row has its context refreshed instead of being duplicated.
  */
 export async function raiseServiceAlert(
   service: string,
@@ -109,23 +150,57 @@ export async function raiseServiceAlert(
 ): Promise<AlertRecord | null> {
   const alertType = serviceAlertType(event);
   const message = formatAlertMessage(event);
+  const cause = formatAlertCause(event);
+  const guidance = guidanceFor(alertType, service);
+  const context = JSON.stringify({
+    rule: event.type,
+    alertId: event.alertId,
+    state: event.state,
+    guidance: guidance.headline,
+    suggestedAction: guidance.action,
+    metadata: event.metadata ?? null,
+  });
 
   try {
     const existing = await prisma.alert.findFirst({
       where: { service, alertType, status: "ACTIVE" },
-      select: { id: true, message: true },
+      select: { id: true, message: true, severity: true },
     });
     if (existing) {
-      if (existing.message === message) return null;
+      // Only touch the row when the escalation actually changed something.
+      if (existing.message === message && existing.severity === event.severity) return null;
       const refreshed = await withDbRetry(
         (): Promise<RawAlert> =>
-          prisma.alert.update({ where: { id: existing.id }, data: { message } }),
+          prisma.alert.update({
+            where: { id: existing.id },
+            data: {
+              message,
+              cause,
+              severity: event.severity,
+              value: event.value ?? null,
+              limitValue: event.limit ?? null,
+              unit: event.unit ?? null,
+              context,
+            },
+          }),
         "alert escalate",
       );
       const record = toAlertRecord(refreshed);
       publishAlert(record);
       return record;
     }
+
+    const raisedAt = timestamp ?? new Date();
+
+    // Alert events are retained, so a resubscribe (or a platform restart)
+    // redelivers the same lab event. Identity is (service, alertType, raised
+    // timestamp): a condition that genuinely recurs carries a new `ts`, so an
+    // identical timestamp is a redelivery and must not become a second row.
+    const alreadyRecorded = await prisma.alert.findFirst({
+      where: { service, alertType, timestamp: raisedAt },
+      select: { id: true },
+    });
+    if (alreadyRecorded) return null;
 
     const created = await withDbRetry(
       (): Promise<RawAlert> =>
@@ -135,7 +210,14 @@ export async function raiseServiceAlert(
             alertType,
             message,
             status: "ACTIVE",
-            timestamp: timestamp ?? new Date(),
+            timestamp: raisedAt,
+            cause,
+            severity: event.severity,
+            entity: event.entity ?? null,
+            value: event.value ?? null,
+            limitValue: event.limit ?? null,
+            unit: event.unit ?? null,
+            context,
           },
         }),
       "alert create",
@@ -153,6 +235,7 @@ export async function raiseServiceAlert(
 export async function clearServiceAlert(
   service: string,
   event: ServiceAlertEvent,
+  at?: Date,
 ): Promise<AlertRecord | null> {
   const alertType = serviceAlertType(event);
   try {
@@ -162,6 +245,7 @@ export async function clearServiceAlert(
     });
     if (!existing) return null;
 
+    const resolvedAt = at ?? (await platformNow());
     const updated = await withDbRetry(
       (): Promise<RawAlert> =>
         prisma.alert.update({
@@ -169,7 +253,7 @@ export async function clearServiceAlert(
           data: {
             status: "RESOLVED",
             resolvedBy: `${service} service`,
-            resolvedAt: new Date(),
+            resolvedAt,
             resolutionNote: `Cleared automatically: ${event.message ?? event.type} is no longer active.`,
           },
         }),
@@ -232,7 +316,7 @@ export async function acknowledgeAlert(
     throw new AlertOperationError("Alert is already acknowledged.", 409);
   }
 
-  const now = new Date();
+  const now = await platformNow();
   const updated = await withDbRetry(
     (): Promise<RawAlert> =>
       prisma.alert.update({
@@ -254,6 +338,7 @@ export async function acknowledgeAlert(
     `Alert ${alert.id} (${alert.service}/${alert.alertType}) acknowledged${
       note?.trim() ? ` — ${note.trim()}` : ""
     }`,
+    now,
   );
 
   const record = toAlertRecord(updated);
@@ -278,7 +363,7 @@ export async function resolveAlert(
     throw new AlertOperationError("Alert is already resolved.", 409);
   }
 
-  const now = new Date();
+  const now = await platformNow();
   const updated = await withDbRetry(
     (): Promise<RawAlert> =>
       prisma.alert.update({
@@ -301,6 +386,7 @@ export async function resolveAlert(
     "ALERT_RESOLVED",
     performedBy,
     `Alert ${alert.id} (${alert.service}/${alert.alertType}) resolved — ${note}`,
+    now,
   );
 
   const record = toAlertRecord(updated);
@@ -312,9 +398,14 @@ export async function writeAuditLog(
   action: string,
   performedBy: string,
   details: string,
+  at?: Date,
 ): Promise<void> {
   try {
-    await prisma.auditLog.create({ data: { action, performedBy, details } });
+    await prisma.auditLog.create({
+      // Stamped on the platform clock so an audit entry sorts against the alert
+      // it describes, which is what a replay of that moment has to show.
+      data: { action, performedBy, details, ...(at ? { timestamp: at } : {}) },
+    });
   } catch (error) {
     console.error("[audit] failed to persist audit log entry", error);
   }

@@ -21,6 +21,10 @@ import {
 import { useCommandRunner } from "@/lib/use-command";
 import { useOperator } from "@/lib/use-operator";
 import { AlertAnnunciator } from "../AlertAnnunciator";
+import { ConfirmButton } from "../ConfirmButton";
+import { InsightPanel } from "../InsightPanel";
+import { PermissionNote } from "../PermissionNote";
+import { PresetPanel } from "../PresetPanel";
 import { ReplayBar } from "../ReplayBar";
 import { Badge, EmptyState, Metric, Panel, ProgressBar, StatusDot } from "../ui";
 import { DishGrid } from "./DishGrid";
@@ -51,6 +55,15 @@ export function RTAView() {
   const [customDecDeg, setCustomDecDeg] = useState("-5.391");
   const [frequencyMhz, setFrequencyMhz] = useState("1420");
   const [subArrayDraft, setSubArrayDraft] = useState("main");
+  const [scheduleAt, setScheduleAt] = useState("");
+  const [azimuthDraft, setAzimuthDraft] = useState("180");
+  const [elevationDraft, setElevationDraft] = useState("45");
+  /**
+   * Manual pointing drafts are seeded once per selected dish so a telemetry
+   * tick never overwrites the number being typed; the panel shows the dish's
+   * live aiming vector next to the target it would slew to.
+   */
+  const [pointingSeededFor, setPointingSeededFor] = useState<string | null>(null);
 
   const arrayState = useMemo(() => getArrayStatus(topics), [topics]);
   const dishes = useMemo(() => getDishes(topics), [topics]);
@@ -102,6 +115,16 @@ export function RTAView() {
     () => dishes.find((dish) => dish.id === selectedDishId) ?? null,
     [dishes, selectedDishId],
   );
+
+  useEffect(() => {
+    if (!selectedDish?.id || pointingSeededFor === selectedDish.id) return;
+    if (selectedDish.metrics?.azimuthDeg === null || selectedDish.metrics?.azimuthDeg === undefined) return;
+    setPointingSeededFor(selectedDish.id);
+    setAzimuthDraft(selectedDish.metrics.azimuthDeg.toFixed(1));
+    if (typeof selectedDish.metrics.elevationDeg === "number") {
+      setElevationDraft(selectedDish.metrics.elevationDeg.toFixed(1));
+    }
+  }, [selectedDish, pointingSeededFor]);
 
   const scanPoints = useMemo(() => getScanSamples(stream), [stream]);
   const scanContext = useMemo(() => getLatestScanContext(events), [events]);
@@ -184,6 +207,8 @@ export function RTAView() {
 
       <ReplayBar service="RTA" />
 
+      <PermissionNote service="RTA" code={operator} />
+
       {derivedAlerts.length > 0 && (
         <div className="panel border-console-warn/40 bg-console-warn/5 px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -201,6 +226,60 @@ export function RTAView() {
           </div>
         </div>
       )}
+
+      <InsightPanel
+        question="Is the array producing science right now, and is it safe to keep observing?"
+        tone={
+          scanning
+            ? windStow
+              ? "warn"
+              : summary.operational < RTA_MIN_OPERATIONAL_DISHES || summary.hotDishes > 0
+                ? "warn"
+                : "ok"
+            : scanStatus === "SCHEDULED" || scanStatus === "PAUSED"
+              ? "warn"
+              : "alert"
+        }
+        answer={
+          scanning
+            ? `${summary.operational} of ${summary.registered} dishes are integrating on ${activeTargetLabel} at ${
+                arrayState?.status.observationFrequencyHz
+                  ? formatNumber(arrayState.status.observationFrequencyHz / 1e6, 0)
+                  : "—"
+              } MHz.`
+            : `Not observing — the array is ${scanStatus.toLowerCase()}${
+                windStow ? " because of wind stow" : ""
+              }${arrayState?.status.nextScanAt ? `, next scan ${formatTime(arrayState.status.nextScanAt)}` : ""}.`
+        }
+        evidence={[
+          {
+            label: "Operational dishes",
+            value: `${summary.operational} / ${summary.registered}`,
+            percent: summary.registered > 0 ? Math.round((summary.operational / summary.registered) * 100) : 0,
+            tone: summary.operational < RTA_MIN_OPERATIONAL_DISHES ? "alert" : "ok",
+            hint: `minimum ${RTA_MIN_OPERATIONAL_DISHES} to observe`,
+          },
+          {
+            label: "Scan stream",
+            value: `${scanPoints.length} pts · ${scanning ? "1 Hz" : "idle"}`,
+            tone: scanning ? "signal" : "neutral",
+            hint: "samples captured by this platform",
+          },
+          {
+            label: "Hot dishes",
+            value: `${summary.hotDishes} ≥ ${RTA_DISH_TEMP_WARN_C.toFixed(0)} °C`,
+            tone: summary.hotDishes > 0 ? "alert" : "ok",
+            hint: `max ${formatNumber(summary.maxTemperatureC, 1)} °C`,
+          },
+          {
+            label: "Wind stow",
+            value: windStow ? "engaged" : "clear",
+            tone: windStow ? "alert" : "ok",
+            hint: `stows at ${RTA_WIND_STOW_LIMIT_MS} m/s gust (LWM)`,
+          },
+        ]}
+        footnote="Read this before touching the controls: a scan on a degraded array still produces an image, it just produces a worse one."
+      />
 
       <div className="grid gap-4 xl:grid-cols-3">
         <div className="space-y-4 xl:col-span-2">
@@ -473,14 +552,14 @@ export function RTAView() {
                 >
                   Resume
                 </button>
-                <button
-                  type="button"
+                <ConfirmButton
                   className="btn btn-danger"
-                  onClick={() => void issue("cancel_scan", "main", true, "Cancel scan")}
+                  label="Cancel scan"
+                  confirmLabel="Cancel the scan"
+                  impact="Cancelling stops the current integration and discards the unfinished scan image. The samples already captured stay available in replay."
+                  onConfirm={() => void issue("cancel_scan", "main", true, "Cancel scan")}
                   disabled={pending !== null || !["SCANNING", "PAUSED", "SCHEDULED"].includes(scanStatus)}
-                >
-                  Cancel scan
-                </button>
+                />
                 <div className="flex items-end gap-2">
                   <div className="flex-1">
                     <label className="label" htmlFor="frequency">
@@ -518,6 +597,66 @@ export function RTAView() {
                 </div>
               </div>
 
+              {/*
+                Scheduling exists because observing runs on sidereal time, not
+                on the operator's shift: the target has to be queued for when it
+                rises. `next_scan` is the service's retained target state.
+              */}
+              <div className="rounded-md border border-console-edge/60 bg-console-void/40 px-2.5 py-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase tracking-[0.14em] text-console-muted">
+                    Scheduled scan
+                  </span>
+                  <span className="font-mono text-[10px] text-console-ink">
+                    {arrayState?.status.nextScanAt ? formatTime(arrayState.status.nextScanAt) : "none queued"}
+                  </span>
+                </div>
+                <div className="mt-1.5 flex items-end gap-2">
+                  <div className="flex-1">
+                    <label className="label" htmlFor="schedule-at">
+                      Queue for
+                    </label>
+                    <input
+                      id="schedule-at"
+                      type="datetime-local"
+                      className="input py-1 text-[11px]"
+                      value={scheduleAt}
+                      onChange={(event) => setScheduleAt(event.target.value)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn px-2 py-1 text-[10px]"
+                    onClick={() =>
+                      void issue(
+                        "schedule_scan",
+                        "main",
+                        new Date(scheduleAt).getTime(),
+                        `Schedule scan for ${new Date(scheduleAt).toLocaleString()}`,
+                      )
+                    }
+                    disabled={
+                      pending !== null ||
+                      !scheduleAt ||
+                      !Number.isFinite(new Date(scheduleAt).getTime()) ||
+                      new Date(scheduleAt).getTime() <= Date.now()
+                    }
+                    title="Queues a scan for the chosen time; the service rejects past times"
+                  >
+                    Queue
+                  </button>
+                  <button
+                    type="button"
+                    className="btn px-2 py-1 text-[10px]"
+                    onClick={() => void issue("schedule_scan", "main", 0, "Clear scheduled scan")}
+                    disabled={pending !== null || !arrayState?.status.nextScanAt}
+                    title="Clears the queued scan (value 0)"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+
               {feedback && (
                 <p
                   className={`rounded-md border px-2.5 py-1.5 text-[11px] ${
@@ -531,6 +670,15 @@ export function RTAView() {
               )}
             </div>
           </Panel>
+
+          <PresetPanel
+            service="RTA"
+            entity={selectedDishId}
+            operator={operator}
+            run={run}
+            pending={pending}
+            title="Observation presets"
+          />
 
           <Panel title="Dish control" subtitle="Per-dish actions are published to the MQTT command topic.">
             {!selectedDish ? (
@@ -612,16 +760,16 @@ export function RTAView() {
                 </p>
 
                 <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
+                  <ConfirmButton
                     className="btn btn-danger"
-                    onClick={() =>
+                    label="Disable dish"
+                    confirmLabel="Take it out of service"
+                    impact={`${selectedDish.id} leaves the array immediately and is dropped from any running scan. The array needs at least ${RTA_MIN_OPERATIONAL_DISHES} operational dishes to keep observing.`}
+                    onConfirm={() =>
                       void issue("enable_dish", selectedDish.id, false, `Disable ${selectedDish.id}`)
                     }
                     disabled={pending !== null || selectedDish.metrics?.enabled === false}
-                  >
-                    Disable dish
-                  </button>
+                  />
                   <button
                     type="button"
                     className="btn btn-primary"
@@ -632,10 +780,16 @@ export function RTAView() {
                   >
                     Enable dish
                   </button>
-                  <button
-                    type="button"
+                  <ConfirmButton
                     className="btn col-span-2"
-                    onClick={() =>
+                    label={selectedDish.metrics?.stowed ? "Release dish" : "Stow dish"}
+                    confirmLabel={selectedDish.metrics?.stowed ? "Release it" : "Stow it"}
+                    impact={
+                      selectedDish.metrics?.stowed
+                        ? `${selectedDish.id} returns to observing; it will slew back to the array's current pointing.`
+                        : `${selectedDish.id} points straight up and holds there, taking it out of the array until released.`
+                    }
+                    onConfirm={() =>
                       void issue(
                         "stow_dish",
                         selectedDish.id,
@@ -644,9 +798,7 @@ export function RTAView() {
                       )
                     }
                     disabled={pending !== null || windStow}
-                  >
-                    {selectedDish.metrics?.stowed ? "Release dish" : "Stow dish"}
-                  </button>
+                  />
                   <button
                     type="button"
                     className="btn col-span-2"
@@ -691,6 +843,98 @@ export function RTAView() {
                   >
                     Assign
                   </button>
+                </div>
+
+                {/*
+                  Manual slewing is the fallback when the target catalogue is
+                  unavailable: the service accepts azimuth/elevation in radians
+                  and rejects the move while the dish is scanning or stowed.
+                */}
+                <div className="rounded-md border border-console-edge/60 bg-console-void/40 px-2.5 py-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] uppercase tracking-[0.14em] text-console-muted">
+                      Manual pointing
+                    </span>
+                    <span className="font-mono text-[10px] text-console-muted">
+                      now {formatNumber(selectedDish.metrics?.azimuthDeg, 1)}° /{" "}
+                      {formatNumber(selectedDish.metrics?.elevationDeg, 1)}°
+                    </span>
+                  </div>
+                  <div className="mt-1.5 grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="label" htmlFor="point-az">
+                        Azimuth (°)
+                      </label>
+                      <input
+                        id="point-az"
+                        className="input py-1 text-[11px]"
+                        inputMode="decimal"
+                        value={azimuthDraft}
+                        onChange={(event) => setAzimuthDraft(event.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="point-el">
+                        Elevation (°)
+                      </label>
+                      <input
+                        id="point-el"
+                        className="input py-1 text-[11px]"
+                        inputMode="decimal"
+                        value={elevationDraft}
+                        onChange={(event) => setElevationDraft(event.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <ConfirmButton
+                      className="btn px-2 py-1 text-[10px]"
+                      label="Slew azimuth"
+                      confirmLabel="Slew it"
+                      impact={`${selectedDish.id} slews to ${azimuthDraft || "—"}° azimuth in one move; the dish cannot track a target while it is slewing, so any running scan loses that dish's samples until it settles.`}
+                      onConfirm={() =>
+                        void issue(
+                          "adjust_azimuth",
+                          selectedDish.id,
+                          (Number(azimuthDraft) * Math.PI) / 180,
+                          `Slew ${selectedDish.id} to azimuth ${azimuthDraft}°`,
+                        )
+                      }
+                      disabled={
+                        pending !== null ||
+                        scanning ||
+                        selectedDish.metrics?.stowed === true ||
+                        !Number.isFinite(Number(azimuthDraft)) ||
+                        Number(azimuthDraft) < 0 ||
+                        Number(azimuthDraft) > 360
+                      }
+                    />
+                    <ConfirmButton
+                      className="btn px-2 py-1 text-[10px]"
+                      label="Slew elevation"
+                      confirmLabel="Slew it"
+                      impact={`${selectedDish.id} slews to ${elevationDraft || "—"}° elevation. Below 15° the array cannot observe there, and the service refuses anything under 5°.`}
+                      onConfirm={() =>
+                        void issue(
+                          "adjust_elevation",
+                          selectedDish.id,
+                          (Number(elevationDraft) * Math.PI) / 180,
+                          `Slew ${selectedDish.id} to elevation ${elevationDraft}°`,
+                        )
+                      }
+                      disabled={
+                        pending !== null ||
+                        scanning ||
+                        selectedDish.metrics?.stowed === true ||
+                        !Number.isFinite(Number(elevationDraft)) ||
+                        Number(elevationDraft) < 5 ||
+                        Number(elevationDraft) > 90
+                      }
+                    />
+                  </div>
+                  <p className="mt-1 text-[10px] text-console-muted">
+                    Sent in radians; rejected while scanning or stowed, and under 5° elevation.
+                  </p>
                 </div>
               </div>
             )}

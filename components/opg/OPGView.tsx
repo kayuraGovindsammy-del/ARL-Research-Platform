@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
   CartesianGrid,
@@ -32,6 +32,10 @@ import { useCommandRunner } from "@/lib/use-command";
 import { useNow } from "@/lib/use-now";
 import { useOperator } from "@/lib/use-operator";
 import { AlertAnnunciator } from "../AlertAnnunciator";
+import { ConfirmButton } from "../ConfirmButton";
+import { InsightPanel } from "../InsightPanel";
+import { PermissionNote } from "../PermissionNote";
+import { PresetPanel } from "../PresetPanel";
 import { ReplayBar } from "../ReplayBar";
 import { Badge, EmptyState, Metric, Panel, ProgressBar, StatusDot } from "../ui";
 import { Gauge } from "./Gauge";
@@ -63,6 +67,19 @@ export function OPGView() {
 
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  /**
+   * The reserve draft is seeded once from whatever the batteries publish, so a
+   * telemetry tick never rewrites the value the operator is dragging. The
+   * label below always shows current vs. target, which is what matters.
+   */
+  const [reserveDraft, setReserveDraft] = useState(30);
+  const reserveSeeded = useRef(false);
+  const publishedReserve = state?.batteryReservePct ?? null;
+  useEffect(() => {
+    if (reserveSeeded.current || typeof publishedReserve !== "number") return;
+    reserveSeeded.current = true;
+    setReserveDraft(Math.round(publishedReserve));
+  }, [publishedReserve]);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +122,41 @@ export function OPGView() {
     totals.demandKw > 0 ? Math.min((totals.producedKw / totals.demandKw) * 100, 200) : null;
   const solarShare = totals.producedKw > 0 ? (totals.solarKw / totals.producedKw) * 100 : null;
 
+  /**
+   * The answer this console commits to: can the plant carry the load without
+   * burning diesel? Everything below the panel is the evidence behind it.
+   */
+  const reserveTargetPct = publishedReserve;
+  const reserveShortfallPct =
+    totals.batteryPct !== null && reserveTargetPct !== null ? totals.batteryPct - reserveTargetPct : null;
+  const insightTone: "ok" | "warn" | "alert" =
+    totals.deficitKw > 0
+      ? "alert"
+      : (totals.batteryPct !== null && totals.batteryPct <= OPG_BATTERY_CRITICAL_PCT) ||
+          (totals.fuelPct !== null && totals.fuelPct <= OPG_DIESEL_LOW_FUEL_PCT) ||
+          (reserveShortfallPct !== null && reserveShortfallPct < 0)
+        ? "warn"
+        : "ok";
+  const insightAnswer =
+    totals.deficitKw > 0
+      ? `No — the plant is ${formatNumber(totals.deficitKw, 1)} kW short of the ${formatNumber(
+          totals.demandKw,
+          1,
+        )} kW load. ${generatorRunning ? "Diesel is carrying the gap." : "Shed load or start a generator."}`
+      : `Yes — ${formatNumber(totals.producedKw, 1)} kW covers the ${formatNumber(totals.demandKw, 1)} kW load. ${
+          reserveShortfallPct !== null && reserveShortfallPct < 0
+            ? `The store is ${formatNumber(Math.abs(reserveShortfallPct), 0)} points below the ${formatNumber(
+                reserveTargetPct ?? 0,
+                0,
+              )} % reserve you set, so diesel is the only margin left.`
+            : reserveShortfallPct !== null
+              ? `The store is ${formatNumber(reserveShortfallPct, 0)} points above your ${formatNumber(
+                  reserveTargetPct ?? 0,
+                  0,
+                )} % reserve.`
+              : "Battery reserve is not published, so the remaining margin is unknown."
+        }`;
+
   const issue = (control: string, entity: string, value: unknown, label: string) =>
     run({ service: "OPG", entity, control, value, researcher: operator }, label);
 
@@ -137,6 +189,8 @@ export function OPGView() {
 
       <ReplayBar service="OPG" />
 
+      <PermissionNote service="OPG" code={operator} />
+
       {derivedAlerts.length > 0 && (
         <div className="panel border-console-warn/40 bg-console-warn/5 px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -154,6 +208,57 @@ export function OPGView() {
           </div>
         </div>
       )}
+
+      <InsightPanel
+        question="Can the plant carry the load without starting a diesel generator?"
+        tone={insightTone}
+        answer={insightAnswer}
+        evidence={[
+          {
+            label: "Output vs demand",
+            value: `${formatNumber(totals.producedKw, 1)} / ${formatNumber(totals.demandKw, 1)} kW`,
+            percent: loadPct === null ? 0 : Math.round(Math.min(loadPct, 100)),
+            tone: totals.deficitKw > 0 ? "alert" : "ok",
+            hint:
+              totals.deficitKw > 0
+                ? `${formatNumber(totals.deficitKw, 1)} kW short`
+                : `${formatNumber(Math.max(totals.producedKw - totals.demandKw, 0), 1)} kW spare`,
+          },
+          {
+            label: "Battery store",
+            value: totals.batteryPct === null ? "—" : `${formatNumber(totals.batteryPct, 1)} %`,
+            percent: totals.batteryPct === null ? 0 : Math.round(totals.batteryPct),
+            tone:
+              totals.batteryPct !== null && totals.batteryPct <= OPG_BATTERY_CRITICAL_PCT
+                ? "alert"
+                : reserveShortfallPct !== null && reserveShortfallPct < 0
+                  ? "warn"
+                  : "signal",
+            hint:
+              reserveTargetPct === null
+                ? "no reserve target set"
+                : `target ${formatNumber(reserveTargetPct, 0)} %`,
+          },
+          {
+            label: "Solar share",
+            value: solarShare === null ? "—" : `${formatNumber(solarShare, 0)} %`,
+            percent: solarShare === null ? 0 : Math.round(Math.min(solarShare, 100)),
+            tone: "signal",
+            hint: `${formatNumber(totals.solarKw, 1)} of ${formatNumber(totals.producedKw, 1)} kW`,
+          },
+          {
+            label: "Diesel fuel",
+            value: totals.fuelPct === null ? "—" : `${formatNumber(totals.fuelPct, 1)} %`,
+            percent: totals.fuelPct === null ? 0 : Math.round(totals.fuelPct),
+            tone:
+              totals.fuelPct !== null && totals.fuelPct <= OPG_DIESEL_LOW_FUEL_PCT ? "alert" : "warn",
+            hint: generatorRunning
+              ? `running, ${formatNumber(totals.dieselKw, 1)} kW`
+              : "generator stopped",
+          },
+        ]}
+        footnote="Coverage is derived from the aggregated power topic; the store, fuel and reserve figures come from plant state, so the answer is only as fresh as the last telemetry tick."
+      />
 
       <Panel
         title="Power generation overview"
@@ -400,6 +505,14 @@ export function OPGView() {
             </div>
           </Panel>
 
+          <PresetPanel
+            service="OPG"
+            operator={operator}
+            run={run}
+            pending={pending}
+            title="Plant presets"
+          />
+
           <Panel title="Power controls" subtitle="Commands are published to arl/opg/cmd/… and audited.">
             <div className="space-y-3">
               <div>
@@ -439,15 +552,60 @@ export function OPGView() {
                 </div>
               </div>
 
+              <div>
+                <label className="label" htmlFor="opg-reserve">
+                  Battery reserve — target {reserveDraft} % (now{" "}
+                  {formatNumber(publishedReserve, 0)} %)
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="opg-reserve"
+                    type="range"
+                    min={10}
+                    max={80}
+                    step={5}
+                    value={reserveDraft}
+                    onChange={(event) => setReserveDraft(Number(event.target.value))}
+                    className="scrubber flex-1"
+                    disabled={pending !== null}
+                  />
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={
+                      pending !== null ||
+                      (typeof publishedReserve === "number" &&
+                        Math.round(publishedReserve) === reserveDraft)
+                    }
+                    onClick={() =>
+                      void issue("battery_reserve", "batteries", reserveDraft, `Reserve ${reserveDraft} %`)
+                    }
+                  >
+                    Apply
+                  </button>
+                </div>
+                <p className="mt-1 text-[10px] text-console-muted">
+                  Below the reserve the plant stops drawing the battery and leans on diesel instead.
+                  Allowed 10–80 %.
+                </p>
+              </div>
+
               <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  className={`btn ${state?.loadShed ? "btn-warn" : ""}`}
+                <ConfirmButton
+                  label="Shed loads"
+                  impact={
+                    state?.loadShed
+                      ? "Load shedding is already engaged."
+                      : `Shedding removes non-essential laboratory loads (currently ${formatNumber(
+                          totals.demandKw,
+                          1,
+                        )} kW of demand) until they are released. Habitat and experiment-critical circuits stay on, but anything classified as non-essential stops immediately and without a cool-down.`
+                  }
+                  confirmLabel="Shed non-essential loads"
                   disabled={pending !== null || state?.loadShed === true}
-                  onClick={() => void issue("load_shed", "global", true, "Engage load shedding")}
-                >
-                  Shed loads
-                </button>
+                  className={`btn ${state?.loadShed ? "btn-warn" : ""}`}
+                  onConfirm={() => void issue("load_shed", "global", true, "Engage load shedding")}
+                />
                 <button
                   type="button"
                   className="btn"
@@ -464,14 +622,17 @@ export function OPGView() {
                 >
                   Enable solar
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-warn"
+                <ConfirmButton
+                  label="Disable solar"
+                  impact={`Disabling the array removes ${formatNumber(
+                    totals.solarKw,
+                    1,
+                  )} kW of generation and shifts the shortfall onto the battery store and diesel backup. If neither can cover demand the plant will start load shedding on its own.`}
+                  confirmLabel="Disable solar array"
                   disabled={pending !== null || state?.solarEnabled === false}
-                  onClick={() => void issue("enable_solar_array", "solar", false, "Disable solar array")}
-                >
-                  Disable solar
-                </button>
+                  className="btn btn-warn"
+                  onConfirm={() => void issue("enable_solar_array", "solar", false, "Disable solar array")}
+                />
                 <button
                   type="button"
                   className="btn btn-primary"
@@ -480,14 +641,14 @@ export function OPGView() {
                 >
                   Start diesel
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-danger"
+                <ConfirmButton
+                  label="Stop diesel"
+                  impact="Stopping the generator begins a 60 s cool-down, after which the array and battery store must carry the full load. Stop it only when another source already covers demand."
+                  confirmLabel="Stop generator"
                   disabled={pending !== null || !generatorRunning}
-                  onClick={() => void issue("stop_generator", "diesel", true, "Stop diesel generator")}
-                >
-                  Stop diesel
-                </button>
+                  className="btn btn-danger"
+                  onConfirm={() => void issue("stop_generator", "diesel", true, "Stop diesel generator")}
+                />
               </div>
 
               {feedback && (
@@ -503,8 +664,10 @@ export function OPGView() {
               )}
 
               <p className="text-[10px] text-console-muted">
-                Solar {state?.solarEnabled === false ? "disabled" : "enabled"} · diesel{" "}
-                {generatorRunning ? "running" : "stopped"} · inverter {inverterStatus || "unknown"}
+                Priority {priority || "—"} · load shedding {state?.loadShed ? "engaged" : "off"} · solar{" "}
+                {state?.solarEnabled === false ? "disabled" : "enabled"} · diesel{" "}
+                {generatorRunning ? "running" : "stopped"} · inverter {inverterStatus || "unknown"} ·
+                reserve {formatNumber(publishedReserve, 0)} %
               </p>
             </div>
           </Panel>

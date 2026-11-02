@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, sendControl, type CommandRequest } from "./api-client";
-import type { CommandOutcome } from "./types";
+import type { CommandOutcome, CommandResult } from "./types";
 
 export interface CommandFeedback {
   tone: "ok" | "warn" | "alert";
@@ -37,8 +37,13 @@ export function useCommandRunner() {
     return () => clearTimeout(timer);
   }, [feedback]);
 
+  /**
+   * Dispatch one control. Resolves to the service's command result (or null
+   * when the request never reached the broker), so multi-step callers such as
+   * the preset runner can report each step instead of only the last one.
+   */
   const run = useCallback(
-    async (request: CommandRequest, label?: string) => {
+    async (request: CommandRequest, label?: string): Promise<CommandResult | null> => {
       const name = label ?? request.control;
       setPending(request.control);
       try {
@@ -48,7 +53,7 @@ export function useCommandRunner() {
           text: `${name} → ${result.message}`,
           outcome: result.outcome,
         });
-        return result.outcome === "completed";
+        return result;
       } catch (caught) {
         const message =
           caught instanceof ApiError
@@ -57,7 +62,7 @@ export function useCommandRunner() {
               ? caught.message
               : String(caught);
         setFeedback({ tone: "alert", text: `${name} failed: ${message}` });
-        return false;
+        return null;
       } finally {
         setPending(null);
       }

@@ -3,7 +3,8 @@ import { z } from "zod";
 import { writeAuditLog } from "@/lib/alerts";
 import { CONTROL_ENTITY_HINT, getControl, validateControlValue } from "@/lib/controls";
 import { getMqttWorker } from "@/lib/mqtt-worker";
-import type { Service } from "@/lib/types";
+import { checkCommandPermission } from "@/lib/researcher-auth";
+import { SERVICES, type Service } from "@/lib/types";
 
 /**
  * POST /api/controls
@@ -14,9 +15,15 @@ import type { Service } from "@/lib/types";
  *   wire: arl/<service>/cmd/<entity>/<control>  ←  {command_id, researcher, value}
  *   ack:  arl/<service>/ack/<command_id>        →  accepted → completed | rejected
  *
- * Values are validated against the catalogue in `lib/controls.ts` first, so an
- * out-of-range input fails here instead of asynchronously on the broker. The
- * response is always 200 once the command was delivered; `result.outcome`
+ * Four checks run before anything reaches the broker, so a mistake is caught
+ * while the operator is still looking at the form:
+ *
+ *   1. the control exists for that service (catalogue in `lib/controls.ts`)
+ *   2. the entity is resolvable and the value is in range
+ *   3. the researcher code is cleared for that experiment (ARL `/v1/researchers`)
+ *   4. the broker is connected
+ *
+ * The response is always 200 once the command was delivered; `result.outcome`
  * carries the service's verdict (completed/rejected/failed/timeout).
  */
 
@@ -33,7 +40,8 @@ class ControlError extends Error {
 }
 
 const bodySchema = z.object({
-  service: z.enum(["RTA", "MHE", "OPG"]),
+  // Driven by the shared service list, so a new service needs no change here.
+  service: z.enum(SERVICES),
   /** Dish id, room id, crew id, sub-array name, or the fixed entity of a global control. */
   entity: z.string().trim().min(1).max(64).optional(),
   control: z.string().trim().min(1).max(64),
@@ -79,7 +87,22 @@ export async function POST(request: NextRequest) {
     const invalid = validateControlValue(spec, input.value, entity);
     if (invalid) throw new ControlError(invalid);
 
-    const researcher = input.researcher?.trim() || "Console Operator";
+    const researcher = input.researcher?.trim() ?? "";
+    // Fail fast when the code cannot command this experiment: the service would
+    // reject it anyway, but only after a publish/ack round trip.
+    const auth = await checkCommandPermission(researcher, service);
+    if (!auth.allowed) {
+      await writeAuditLog(
+        "CONTROL_DENIED",
+        researcher || "(none)",
+        `${service} ${input.control} → ${entity} denied — ${auth.reason}`,
+      );
+      return NextResponse.json(
+        { error: auth.reason, reason: "researcher_not_permitted", auth },
+        { status: 403, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
     const worker = getMqttWorker();
     const result = await worker.executeControl({
       service,
@@ -98,7 +121,7 @@ export async function POST(request: NextRequest) {
     );
 
     return NextResponse.json(
-      { ok: result.outcome === "completed", result },
+      { ok: result.outcome === "completed", result, auth },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

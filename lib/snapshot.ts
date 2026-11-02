@@ -1,6 +1,8 @@
 import { Prisma } from "@prisma/client";
+import { toAlertRecord } from "./alerts";
 import { prisma } from "./prisma";
-import type { ReplaySnapshot, Service, TopicState } from "./types";
+import { parseTopic } from "./topics";
+import type { AlertRecord, ReplayContext, ReplaySnapshot, Service, TopicState } from "./types";
 
 /**
  * Snapshot read model shared by the replay API and the live hydration API.
@@ -68,6 +70,81 @@ export async function getSnapshot(
     service,
     topics,
     count: rows.length,
+  };
+}
+
+/** Alerts raised inside this window of the cursor are shown as context. */
+export const REPLAY_CONTEXT_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * The alert's lifecycle state *as it was at the cursor*, not as it is now.
+ * A row that has since been resolved was still ACTIVE at the time.
+ */
+export function alertStatusAt(alert: AlertRecord, targetTime: Date): AlertRecord["status"] {
+  const at = targetTime.getTime();
+  if (alert.resolvedAt && Date.parse(alert.resolvedAt) <= at) return "RESOLVED";
+  if (alert.acknowledgedAt && Date.parse(alert.acknowledgedAt) <= at) return "ACKNOWLEDGED";
+  return "ACTIVE";
+}
+
+/**
+ * Everything replay needs beyond instrument values: which alerts were live at
+ * the cursor, which were raised in the preceding window, and the service events
+ * (scan lifecycle, surveys, refuels, …) that happened around it.
+ */
+export async function getReplayContext(
+  targetTime: Date,
+  service: Service | null,
+  windowMs = REPLAY_CONTEXT_WINDOW_MS,
+): Promise<ReplayContext> {
+  const windowStart = new Date(targetTime.getTime() - windowMs);
+  const scope = service ? { service } : {};
+
+  const [live, recent, eventRows] = await Promise.all([
+    prisma.alert.findMany({
+      where: {
+        ...scope,
+        timestamp: { lte: targetTime },
+        OR: [{ resolvedAt: null }, { resolvedAt: { gt: targetTime } }],
+      },
+      orderBy: { timestamp: "desc" },
+      take: 100,
+    }),
+    prisma.alert.findMany({
+      where: { ...scope, timestamp: { gte: windowStart, lte: targetTime } },
+      orderBy: { timestamp: "desc" },
+      take: 50,
+    }),
+    prisma.telemetry.findMany({
+      where: {
+        ...scope,
+        topic: { contains: "/events/" },
+        timestamp: { gte: windowStart, lte: targetTime },
+      },
+      orderBy: { timestamp: "asc" },
+      take: 100,
+      select: { service: true, topic: true, payload: true, timestamp: true },
+    }),
+  ]);
+
+  const asAt = (rows: Array<Parameters<typeof toAlertRecord>[0]>): AlertRecord[] =>
+    rows.map((row) => {
+      const record = toAlertRecord(row);
+      return { ...record, status: alertStatusAt(record, targetTime) };
+    });
+
+  const events = eventRows.map((row) => ({
+    service: row.service,
+    kind: parseTopic(row.topic).name ?? "event",
+    payload: parsePayload(row.payload),
+    timestamp: toIso(row.timestamp),
+  }));
+
+  return {
+    activeAlerts: asAt(live),
+    recentAlerts: asAt(recent),
+    events,
+    windowMs,
   };
 }
 

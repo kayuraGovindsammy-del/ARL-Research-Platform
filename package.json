@@ -8,12 +8,13 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "broker": "node scripts/dev-broker.mjs",
-    "simulate": "node scripts/mqtt-simulator.mjs",
     "topics": "node scripts/mqtt-topics.mjs",
     "pub": "node scripts/mqtt-pub.mjs"
   },
@@ -35,6 +36,7 @@
     "postcss": "8.4.39",
     "prisma": "5.22.0",
     "tailwindcss": "3.4.6",
-    "typescript": "5.5.3"
+    "typescript": "5.5.3",
+    "vitest": "^1.6.0"
   }
 }

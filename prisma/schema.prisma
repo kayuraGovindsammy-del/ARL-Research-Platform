@@ -12,7 +12,7 @@ datasource db {
 }
 
 /// Raw or derived telemetry sample ingested from the MQTT broker.
-/// `service` is one of RTA | MHE | OPG, `payload` holds a JSON string.
+/// `service` is one of RTA | MHE | OPG | LWM, `payload` holds a JSON string.
 model Telemetry {
   id        String   @id @default(uuid())
   service   String
@@ -27,6 +27,11 @@ model Telemetry {
 
 /// Operational alert raised by ingestion rules or explicit payload flags.
 /// `status` is one of ACTIVE | ACKNOWLEDGED | RESOLVED.
+///
+/// The annunciator contract stores the whole decision context, not just a
+/// sentence: who raised it and when, who acknowledged/resolved it and when,
+/// and the cause (rule + entity + measured value against its limit) so a
+/// researcher arriving later can decide what to do without replaying the log.
 model Alert {
   id             String    @id @default(uuid())
   service        String
@@ -39,6 +44,17 @@ model Alert {
   resolvedBy     String?
   resolvedAt     DateTime?
   resolutionNote String?
+  /// Human-readable cause: rule, entity and the value that breached the limit.
+  cause          String?
+  /// info | warning | critical
+  severity       String?
+  /// Dish / room / crew / array / `global`.
+  entity         String?
+  value          Float?
+  limitValue     Float?
+  unit           String?
+  /// JSON blob: rule id, service metadata and the suggested operator action.
+  context        String?
 
   @@index([status, service])
   @@index([timestamp])
