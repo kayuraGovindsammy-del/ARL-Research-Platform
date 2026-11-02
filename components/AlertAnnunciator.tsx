@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { guidanceFor, severityRank } from "@/lib/alert-guidance";
 import { formatDateTime, timeAgo, titleCase } from "@/lib/format";
 import { useTelemetry, type ServiceEvent } from "@/lib/telemetry-store";
+import { THEME } from "@/lib/theme";
 import { alertSeverity, type AlertRecord, type AlertStatus } from "@/lib/types";
-import { Badge, EmptyState, Modal, Panel, StatusDot, type Tone } from "./ui";
+import { Badge, EmptyState, Modal, Panel, StatusDot, toneAccent, type Tone } from "./ui";
 
 const STATUS_TONE: Record<AlertStatus, Tone> = {
   ACTIVE: "alert",
@@ -78,15 +79,25 @@ function AlertRow({
 }) {
   const status = alert.status;
   const severity = alertSeverity(alert);
+  const severityTone = SEVERITY_TONE[severity] ?? "warn";
   const guidance = guidanceFor(alert.alertType, alert.service);
   return (
-    <li className="border-b border-console-edge/50 px-3 py-2.5 last:border-b-0">
+    <li className="relative border-b border-console-edge/50 py-2.5 pl-4 pr-3 last:border-b-0">
+      {/* Severity stripe: the worst rows read as hot even before the badges are. */}
+      <span
+        aria-hidden
+        className="absolute inset-y-0 left-0 w-[2px]"
+        style={{
+          background: `linear-gradient(180deg, ${toneAccent[severityTone]}, transparent 92%)`,
+          opacity: status === "RESOLVED" ? 0.28 : 0.95,
+        }}
+      />
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={STATUS_TONE[status]}>
           <StatusDot tone={STATUS_TONE[status]} pulse={status === "ACTIVE"} />
           {status}
         </Badge>
-        <Badge tone={SEVERITY_TONE[severity] ?? "warn"}>{severity}</Badge>
+        <Badge tone={severityTone}>{severity}</Badge>
         <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-console-info">
           {alert.service}
         </span>
@@ -387,6 +398,7 @@ export function AlertAnnunciator({
     <Panel
       className={className}
       bodyClassName=""
+      accent={counts.ACTIVE > 0 ? toneAccent.alert : THEME.solar}
       title={title}
       subtitle={
         readOnly

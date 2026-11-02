@@ -2,8 +2,19 @@
 
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
+import { THEME } from "@/lib/theme";
 
 export type Tone = "neutral" | "ok" | "warn" | "alert" | "info" | "signal";
+
+/** The palette value behind each tone, for inline styles that need a literal. */
+export const toneAccent: Record<Tone, string> = {
+  neutral: THEME.muted,
+  ok: THEME.ok,
+  warn: THEME.warn,
+  alert: THEME.alert,
+  info: THEME.info,
+  signal: THEME.signal,
+};
 
 export const toneText: Record<Tone, string> = {
   neutral: "text-console-muted",
@@ -56,6 +67,7 @@ export function Panel({
   children,
   className = "",
   bodyClassName = "p-4",
+  accent,
 }: {
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
@@ -63,9 +75,14 @@ export function Panel({
   children: React.ReactNode;
   className?: string;
   bodyClassName?: string;
+  /** Service colour for the panel's filament, e.g. `#ffc978` for RTA. */
+  accent?: string;
 }) {
   return (
-    <section className={`panel ${className}`}>
+    <section
+      className={`panel ${accent ? "panel-accent" : ""} ${className}`}
+      style={accent ? ({ "--accent": accent } as React.CSSProperties) : undefined}
+    >
       {(title || actions) && (
         <header className="panel-header">
           <div className="min-w-0">
@@ -96,7 +113,13 @@ export function Metric({
   className?: string;
 }) {
   return (
-    <div className={`rounded-lg border border-console-edge/60 bg-console-void/40 px-3 py-2 ${className}`}>
+    <div
+      className={`relative overflow-hidden rounded-lg border border-console-edge/50 px-3 py-2 ${className}`}
+      style={{
+        background:
+          "linear-gradient(160deg, rgba(61,42,34,0.35), rgba(16,12,11,0.55))",
+      }}
+    >
       <div className="metric-label">{label}</div>
       <div className={`metric-value ${tone === "neutral" ? "" : toneText[tone]}`}>
         {value}
@@ -128,8 +151,11 @@ export function ProgressBar({
   };
   const percent = max > 0 ? Math.min(Math.max((value / max) * 100, 0), 100) : 0;
   return (
-    <div className={`w-full overflow-hidden rounded-full bg-console-grid ${height}`}>
-      <div className={`h-full rounded-full ${colors[tone]} transition-all`} style={{ width: `${percent}%` }} />
+    <div className={`w-full overflow-hidden rounded-full border border-console-edge/60 bg-console-void/80 ${height}`}>
+      <div
+        className={`h-full rounded-full ${colors[tone]} transition-all`}
+        style={{ width: `${percent}%`, boxShadow: "0 0 12px -2px currentColor" }}
+      />
     </div>
   );
 }

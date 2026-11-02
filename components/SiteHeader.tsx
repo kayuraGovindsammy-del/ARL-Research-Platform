@@ -11,9 +11,35 @@ const LINKS = [
   { href: "/rta", label: "RTA" },
   { href: "/mhe", label: "MHE" },
   { href: "/opg", label: "OPG" },
-  { href: "/lwm", label: "LWM" },
   { href: "/alerts", label: "Alerts" },
 ];
+
+/** Mars over a faint orbit ring: the console's mission mark. */
+function MissionMark() {
+  return (
+    <span className="relative flex h-9 w-9 shrink-0 items-center justify-center">
+      <span
+        aria-hidden
+        className="absolute inset-0 rounded-full border border-console-signal/25"
+      />
+      <span
+        aria-hidden
+        className="absolute inset-1 rounded-full"
+        style={{
+          background:
+            "radial-gradient(circle at 34% 30%, #ffd0a3 0%, #ff7a45 38%, #a8452a 72%, #6d2c1c 100%)",
+          boxShadow: "0 0 18px -2px rgba(255,122,69,0.75), inset -2px -2px 6px rgba(0,0,0,0.55)",
+        }}
+      />
+      <span
+        aria-hidden
+        className="absolute h-9 w-9 rounded-full border-t border-console-sand/50"
+        style={{ transform: "rotate(-28deg)" }}
+      />
+      <span className="absolute bottom-0.5 right-0 h-1.5 w-1.5 rounded-full bg-console-sand/80 shadow-[0_0_8px_#e8c8a4]" />
+    </span>
+  );
+}
 
 interface AlertSummary {
   ok: boolean;
@@ -118,36 +144,45 @@ export function SiteHeader() {
         : "ok";
 
   return (
-    <header className="sticky top-0 z-40 border-b border-console-edge/80 bg-console-void/85 backdrop-blur">
-      <div className="mx-auto flex w-full max-w-[1600px] flex-wrap items-center gap-x-6 gap-y-2 px-4 py-2.5">
-        <Link href="/" className="flex items-center gap-2.5">
-          <span className="flex h-7 w-7 items-center justify-center rounded-md border border-console-signal/50 bg-console-signal/10 font-mono text-xs font-bold text-console-signal">
-            AR
-          </span>
+    <header className="sticky top-0 z-40 border-b border-console-edge/70 bg-console-void/80 backdrop-blur-md">
+      <div
+        aria-hidden
+        className="h-px w-full bg-gradient-to-r from-transparent via-console-signal/50 to-transparent"
+      />
+
+      <div className="mx-auto flex w-full max-w-[1600px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5">
+        <Link href="/" className="group flex items-center gap-3">
+          <MissionMark />
           <span className="leading-tight">
-            <span className="block text-[13px] font-semibold uppercase tracking-[0.18em] text-console-ink">
+            <span className="block font-display text-[14px] font-semibold uppercase tracking-[0.26em] text-console-ink">
               ARL Control
             </span>
-            <span className="block font-mono text-[9px] uppercase tracking-[0.2em] text-console-muted">
-              Astro-Research Laboratory
+            <span className="block font-mono text-[9px] uppercase tracking-[0.22em] text-console-muted">
+              Astro-Research Laboratory · Mars
             </span>
           </span>
         </Link>
 
-        <nav className="flex items-center gap-1">
+        <nav className="flex items-center gap-1 rounded-lg border border-console-edge/60 bg-console-panel/50 p-1">
           {LINKS.map((link) => {
             const active = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
             return (
               <Link
                 key={link.href}
                 href={link.href}
-                className={`rounded-md px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] transition-colors ${
+                className={`relative rounded-md px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] transition-colors ${
                   active
-                    ? "bg-console-grid text-console-signal"
-                    : "text-console-muted hover:bg-console-grid/60 hover:text-console-ink"
+                    ? "bg-console-rust/30 text-console-sand shadow-[inset_0_0_0_1px_rgba(255,122,69,0.35)]"
+                    : "text-console-muted hover:bg-console-grid/70 hover:text-console-ink"
                 }`}
               >
                 {link.label}
+                {active && (
+                  <span
+                    aria-hidden
+                    className="absolute inset-x-2.5 -bottom-[5px] h-0.5 rounded-full bg-console-signal shadow-[0_0_10px_#ff7a45]"
+                  />
+                )}
               </Link>
             );
           })}
@@ -167,7 +202,9 @@ export function SiteHeader() {
             <StatusDot tone={healthTone(brokerOk, !checked)} pulse={!brokerOk} />
             mqtt {health?.mqtt.state ?? ""}
           </Badge>
-          <span className="font-mono text-xs tabular-nums text-console-muted">{clock}</span>
+          <span className="rounded-md border border-console-edge/60 bg-console-grid/50 px-2 py-1 font-mono text-xs tabular-nums text-console-sand/90">
+            {clock}
+          </span>
         </div>
       </div>
 
@@ -175,15 +212,15 @@ export function SiteHeader() {
         href="/alerts"
         className={`block border-t transition-colors ${
           stripTone === "alert"
-            ? "border-console-alert/60 bg-console-alert/15 hover:bg-console-alert/20"
+            ? "border-console-alert/50 bg-console-alert/10 hover:bg-console-alert/20"
             : stripTone === "warn"
-              ? "border-console-warn/50 bg-console-warn/10 hover:bg-console-warn/15"
-              : "border-console-edge/60 bg-console-void/60 hover:bg-console-grid/40"
+              ? "border-console-warn/40 bg-console-warn/10 hover:bg-console-warn/20"
+              : "border-console-edge/50 bg-console-panel/40 hover:bg-console-grid/50"
         }`}
       >
         <div className="mx-auto flex w-full max-w-[1600px] flex-wrap items-center gap-x-3 gap-y-1 px-4 py-1 text-[11px]">
           <span
-            className={`flex items-center gap-1.5 font-semibold uppercase tracking-[0.16em] ${
+            className={`flex items-center gap-1.5 font-semibold uppercase tracking-[0.2em] ${
               stripTone === "alert"
                 ? "text-console-alert"
                 : stripTone === "warn"
@@ -213,13 +250,13 @@ export function SiteHeader() {
               </span>
               {alerts.newest && (
                 <span className="min-w-0 flex-1 truncate text-console-muted">
-                  <span className="font-mono uppercase tracking-[0.12em] text-console-info">
+                  <span className="font-mono uppercase tracking-[0.12em] text-console-solar">
                     {alerts.newest.service}
                   </span>{" "}
                   {alerts.newest.message}
                 </span>
               )}
-              <span className="ml-auto hidden shrink-0 font-mono uppercase tracking-[0.14em] text-console-signal sm:inline">
+              <span className="ml-auto hidden shrink-0 font-mono uppercase tracking-[0.16em] text-console-signal sm:inline">
                 open alert log →
               </span>
             </>

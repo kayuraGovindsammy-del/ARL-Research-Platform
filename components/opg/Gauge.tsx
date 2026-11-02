@@ -1,12 +1,12 @@
 "use client";
 
 const TONE_HEX = {
-  signal: "#38f2c3",
-  ok: "#4ade80",
-  warn: "#ffab4a",
-  alert: "#ff5d5d",
-  info: "#67b6ff",
-  solar: "#ffd166",
+  signal: "#ff7a45",
+  ok: "#5fd39b",
+  warn: "#ffa14b",
+  alert: "#ff4b3e",
+  info: "#8ab4ff",
+  solar: "#ffc978",
 } as const;
 
 /** 270° SVG gauge used for battery reserve and plant load factor. */
@@ -42,7 +42,7 @@ export function Gauge({
           cy="76"
           r={radius}
           fill="none"
-          stroke="#1c2533"
+          stroke="#33231d"
           strokeWidth="10"
           strokeLinecap="round"
           strokeDasharray={`${arc} ${circumference}`}
@@ -60,7 +60,7 @@ export function Gauge({
           transform="rotate(135 80 76)"
           style={{ filter: `drop-shadow(0 0 6px ${color}66)`, transition: "stroke-dasharray 400ms ease" }}
         />
-        <text x="80" y="74" textAnchor="middle" className="fill-console-ink" style={{ fontSize: 24, fontFamily: "ui-monospace, monospace" }}>
+        <text x="80" y="74" textAnchor="middle" className="fill-console-ink" style={{ fontSize: 24, fontFamily: "JetBrains Mono, ui-monospace, monospace" }}>
           {value === null || !Number.isFinite(value) ? "—" : safe.toFixed(digits)}
         </text>
         <text x="80" y="94" textAnchor="middle" className="fill-console-muted" style={{ fontSize: 10, letterSpacing: 1.5 }}>

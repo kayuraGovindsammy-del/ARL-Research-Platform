@@ -23,6 +23,7 @@ import {
   type TrendPoint,
 } from "@/lib/opg-selectors";
 import { useTelemetry } from "@/lib/telemetry-store";
+import { SERVICE_ACCENT } from "@/lib/theme";
 import {
   OPG_BATTERY_CRITICAL_PCT,
   OPG_DIESEL_LOW_FUEL_PCT,
@@ -32,6 +33,7 @@ import { useCommandRunner } from "@/lib/use-command";
 import { useNow } from "@/lib/use-now";
 import { useOperator } from "@/lib/use-operator";
 import { AlertAnnunciator } from "../AlertAnnunciator";
+import { ServiceHeader } from "../ServiceHeader";
 import { ConfirmButton } from "../ConfirmButton";
 import { InsightPanel } from "../InsightPanel";
 import { PermissionNote } from "../PermissionNote";
@@ -161,21 +163,18 @@ export function OPGView() {
     run({ service: "OPG", entity, control, value, researcher: operator }, label);
 
   return (
-    <div className="space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-console-signal">
-            Service 03 · On-Demand Power Generation
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-console-ink">
-            Plant generation & load control
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-console-muted">
-            Solar, battery store and diesel backup for the whole laboratory, with source switching and
-            load-shedding authority.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+    <div
+      className="accent-scope space-y-4"
+      style={{ "--accent": SERVICE_ACCENT.OPG } as React.CSSProperties}
+    >
+      <ServiceHeader
+        index="03"
+        service="On-Demand Power Generation"
+        title="Plant generation & load control"
+        blurb="Solar, battery store and diesel backup for the whole laboratory, with source switching and load-shedding authority."
+        accent="#8ab4ff"
+        status={
+          <div className="flex flex-wrap items-center gap-2">
           <Badge tone={totals.deficitKw > 0 ? "alert" : "ok"}>
             <StatusDot tone={totals.deficitKw > 0 ? "alert" : "ok"} pulse={totals.deficitKw > 0} />
             {totals.deficitKw > 0 ? `${formatNumber(totals.deficitKw, 1)} kW deficit` : "demand covered"}
@@ -184,8 +183,9 @@ export function OPGView() {
           {state?.loadShed && <Badge tone="warn">load shedding</Badge>}
           <Badge tone="neutral">last telemetry {lastTelemetryAt ? timeAgo(lastTelemetryAt, now) : "—"}</Badge>
           {mode === "replay" && <Badge tone="warn">historical view</Badge>}
-        </div>
-      </header>
+          </div>
+        }
+      />
 
       <ReplayBar service="OPG" />
 
@@ -357,27 +357,27 @@ export function OPGView() {
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={trend} margin={{ top: 6, right: 8, bottom: 0, left: -18 }}>
-                    <CartesianGrid stroke="#1c2533" strokeDasharray="3 3" />
+                    <CartesianGrid stroke="#33231d" strokeDasharray="3 3" />
                     <XAxis
                       dataKey="t"
                       type="number"
                       domain={["dataMin", "dataMax"]}
                       scale="time"
                       tickFormatter={(value) => formatTime(new Date(Number(value)).toISOString())}
-                      stroke="#7d8ca3"
-                      tick={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
+                      stroke="#a89285"
+                      tick={{ fontSize: 10, fontFamily: "JetBrains Mono, ui-monospace, monospace" }}
                       minTickGap={28}
                     />
                     <YAxis
-                      stroke="#7d8ca3"
-                      tick={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
+                      stroke="#a89285"
+                      tick={{ fontSize: 10, fontFamily: "JetBrains Mono, ui-monospace, monospace" }}
                       width={48}
                       unit=" kW"
                     />
                     <Tooltip
                       contentStyle={{
-                        background: "#0b1018",
-                        border: "1px solid #1c2533",
+                        background: "#140f0d",
+                        border: "1px solid #33231d",
                         borderRadius: 8,
                         fontSize: 11,
                       }}
@@ -387,8 +387,8 @@ export function OPGView() {
                       type="monotone"
                       dataKey="solarKw"
                       name="Solar kW"
-                      stroke="#ffd166"
-                      fill="#ffd166"
+                      stroke="#ffc978"
+                      fill="#ffc978"
                       fillOpacity={0.18}
                       strokeWidth={1.5}
                       isAnimationActive={false}
@@ -397,8 +397,8 @@ export function OPGView() {
                       type="monotone"
                       dataKey="dieselKw"
                       name="Diesel kW"
-                      stroke="#ffab4a"
-                      fill="#ffab4a"
+                      stroke="#ffa14b"
+                      fill="#ffa14b"
                       fillOpacity={0.14}
                       strokeWidth={1.5}
                       isAnimationActive={false}
@@ -407,7 +407,7 @@ export function OPGView() {
                       type="monotone"
                       dataKey="demandKw"
                       name="Demand kW"
-                      stroke="#67b6ff"
+                      stroke="#8ab4ff"
                       strokeWidth={1.5}
                       dot={false}
                       isAnimationActive={false}

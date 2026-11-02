@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDateTime, formatDuration, formatTime } from "@/lib/format";
+import { THEME } from "@/lib/theme";
 import { REPLAY_SPEEDS, STEP_MS, useTelemetry } from "@/lib/telemetry-store";
 import { ConnectionBadge } from "./ConnectionBadge";
 import { Badge } from "./ui";
@@ -103,8 +104,13 @@ export function ReplayBar({ service }: { service?: string }) {
     step(STEP_MS);
   };
 
+  // Gold while the dashboard is on the live edge, amber once the cursor is in
+  // history — the transport bar changes colour with the data source.
   return (
-    <section className="panel px-4 py-3">
+    <section
+      className="panel panel-accent px-4 py-3"
+      style={{ "--accent": mode === "replay" ? THEME.warn : THEME.solar } as React.CSSProperties}
+    >
       <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
         <div className="flex items-center gap-2">
           <span className="panel-title">Replay</span>

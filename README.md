@@ -1,8 +1,10 @@
 # ARL Research Platform
 
 Monitoring, control, alerting and replay for the Astro-Research Laboratory services
-(Radio Telescope Array, Mars Habitation Experiment, On-demand Power Generation, Local
-Weather Monitoring), built for COMS3011A SDP.
+(Radio Telescope Array, Mars Habitation Experiment, On-demand Power Generation). The
+platform also ingests Local Weather Monitoring telemetry: LWM has no console of its own, but
+its alerts still belong in the annunciator and its samples still belong in replay. Built for
+COMS3011A SDP.
 
 The platform is a single Next.js application: it ingests the services' MQTT traffic into a
 local SQLite store, derives the numbers a researcher actually asks for, raises and tracks
@@ -10,7 +12,8 @@ alerts through a full acknowledge/resolve lifecycle, publishes controls and wait
 service's acknowledgement, and can replay any captured instant of the lab together with the
 alerts and events that were live at that moment.
 
-![pages](https://img.shields.io/badge/pages-overview%20%7C%20rta%20%7C%20mhe%20%7C%20opg%20%7C%20lwm%20%7C%20alerts-informational)
+![pages](https://img.shields.io/badge/pages-overview%20%7C%20rta%20%7C%20mhe%20%7C%20opg%20%7C%20alerts-informational)
+![theme](https://img.shields.io/badge/theme-space%20%2B%20mars%20surface-ff7a45)
 
 ---
 
@@ -32,7 +35,7 @@ npm run start               # serves the build on :3000
 Tests (no lab, no broker, no network required):
 
 ```bash
-npm test                    # vitest run — 101 tests, 5 files
+npm test                    # vitest run — 97 tests, 5 files
 npm run test:watch
 npm run typecheck           # tsc --noEmit
 ```
@@ -97,14 +100,15 @@ Verified against the lab on 2026-11-02 (`GET /api/health`):
 "alerts": { "ok": true, "active": 2, "warning": 1, "info": 1 }
 ```
 
-All four services are captured and persisted (counts read back from SQLite):
+All four services are ingested and persisted (counts read back from SQLite); three of them
+have a console:
 
 | Service | Samples | Topics | Derived answers shipped |
 | --- | --- | --- | --- |
 | RTA | 121 800 | 695 | availability vs 80-dish minimum, wind-stow risk, sensitivity, scan progress |
 | MHE | 1 174 | 60 | air viability, O2/CO2 margin, crew vitals, airlock state, crop water |
 | OPG | 530 | 11 | can the plant carry the load without diesel, reserve shortfall, solar share |
-| LWM | 1 288 | 41 | is it safe to point the array, best observing site, soiling impact on solar yield |
+| LWM (no console) | 1 288 | 41 | ingested for wind/soiling context; its alerts still reach the annunciator |
 
 Two lab facts are worth stating plainly, because both are visible in the UI rather than
 hidden behind a timeout:
@@ -131,8 +135,14 @@ hidden behind a timeout:
 | `/rta` | Dish grid, scan heat map, subarray controls, observation planning |
 | `/mhe` | Habitat layout, room climate, crew vitals, airlock and life-support control |
 | `/opg` | Load/generation balance, gauges, reserve and supply-mode control |
-| `/lwm` | Station comparison, gust-vs-stow-limit chart, consequence view, instrument control |
 | `/alerts` | The platform alert log: filter, acknowledge, resolve, audit trail |
+
+LWM has no page: the station-comparison and gust-versus-stow questions were answered by a
+console that duplicated RTA's wind story, so the page, its six controls, its two presets and
+its selectors were removed. The service is still ingested — an LWM alert (for example a
+gust over the array's stow limit) appears in the annunciator like any other, and LWM samples
+still replay — because dropping the subscription would strand the alerts that are already
+active on the lab.
 
 No sign-in: the platform runs on the operator's workstation. The operator code is a
 first-class field (`components/ResearcherBadge.tsx`) because it decides both attribution and
@@ -142,6 +152,30 @@ The replay transport bar sits on every console page: **Replay** toggles between 
 the historical snapshot, **play/pause**, **rewind**, **fast-forward** and **speed**
 (×1/×2/×4/×8) move a cursor through the captured window, and the alert list plus service
 events re-render at that cursor rather than at now.
+
+### The look: a habitat window onto Mars
+
+The whole application is themed as a station console looking out over the Martian surface,
+because that is what the lab is: a habitat experiment and a dish array on a planet with
+weather. Four decisions carry it:
+
+- **One palette, one place.** `tailwind.config.ts` owns the colours (near-black space ground,
+  basalt panels, ember `#ff7a45`, sun gold `#ffc978`, sand `#e8c8a4`, plasma blue `#8ab4ff`)
+  and `lib/theme.ts` mirrors them for the places that cannot take a class — `<canvas>` heat
+  maps, inline SVG gauges and habitat rooms, Recharts axes. Repainting a token repaints the
+  app, and no component holds a stray hex.
+- **Three fixed background layers.** A drifting starfield, a violet/ember nebula wash and a
+  horizon glow pinned to the bottom of the viewport. All three are pointer-transparent and
+  sit behind the content, so an operator reading a dish temperature is never fighting the
+  decoration.
+- **A service accent, not a redesign per service.** RTA is gold, MHE ember, OPG plasma blue.
+  Each console sets `--accent` once on its root; the shared `ServiceHeader`, panel filaments,
+  title chips, the annunciator and the replay bar all pick it up. The annunciator turns red
+  when something is active and gold when the board is clear; the replay bar is gold on the
+  live edge and amber in history.
+- **The theme knows when to stop.** `prefers-reduced-motion` disables the drift, the blink and
+  every `animate-*` class; alert severity is carried by text and a stripe as well as colour;
+  contrast was measured at 17:1 for body text on the panel surface.
 
 ---
 
@@ -179,7 +213,7 @@ services ----------> MQTT client (one)  ----------> | ingest rules (pure, tested
 | `lib/alerts.ts` | Alert lifecycle: raise/dedupe/escalate/acknowledge/resolve, audit log |
 | `lib/alert-guidance.ts` | Cause and operator guidance per alert type (the "what do I do now" text) |
 | `lib/snapshot.ts` | Replay read model: newest sample per topic at T, alert status at T, events around T |
-| `lib/{rta,mhe,opg,lwm}-selectors.ts` | Service view models: derived measures, comparisons, derived alerts |
+| `lib/{rta,mhe,opg}-selectors.ts` | Service view models: derived measures, comparisons, derived alerts |
 | `lib/controls.ts` | Control catalogue per service plus value validation (the same rules the API enforces) |
 | `lib/presets.ts` | Researcher workflows as ordered multi-step presets |
 | `lib/researcher-auth.ts` | "May this code command this service?" with a short-lived cache |
@@ -202,9 +236,12 @@ service-specific:
 Persistence, alerting, replay, streaming, acknowledgement and the audit trail are reused
 unchanged. Ingest is driven entirely by the topic structure the service publishes
 (`$topology` plus `telemetry`/`state`/`events`/`ack`), not by per-service parsing code, so a
-new device that speaks the same contract needs no ingest change at all. LWM was added this
-way, and the service list is the only input to the route schema (`z.enum(SERVICES)`), which
-is also why an earlier three-service enum that would have rejected every LWM command is gone.
+new device that speaks the same contract needs no ingest change at all. LWM proved that: it
+was added as a service with no ingest code of its own, and when its console was retired the
+data plane did not change at all — only `CONSOLE_SERVICES` in `lib/types.ts` decides which
+services get a page, controls and presets. `SERVICES` remains the single input to the route
+schema (`z.enum(SERVICES)`), which is also why an earlier three-service enum that would have
+rejected every LWM command is gone.
 
 ### Data rates, back pressure and failure handling
 
@@ -258,11 +295,9 @@ Derived and aggregated measures (`lib/*-selectors.ts`, each covered by tests):
 | Is the habitat air breathable? | O2/CO2 margin per room, stale-telemetry detection |
 | Has a crew member crossed a clinical line? | Heart-rate and SpO2 thresholds, survey currency |
 | Can the plant carry the load without diesel? | Aggregated generation vs demand, reserve shortfall, solar share |
-| Is it safe to point the dishes now? | Worst gust across LWM stations vs the array's stow limit |
-| Where should the next observation go? | Per-site wind/humidity/irradiance comparison |
-| Is the soiling reference still trustworthy? | Soiling ratio against the reference panels, and its effect on solar yield |
+| Is it safe to point the dishes now? | The array's own wind-stow state, its release threshold and the hot-dish count |
 
-Each service page opens with an `InsightPanel`: the question in plain language, a one-line
+Each console page opens with an `InsightPanel`: the question in plain language, a one-line
 answer, and the four numbers that justify it, each with the hint that says how it was
 computed and which panel shows the underlying series.
 
@@ -334,11 +369,9 @@ timeline ahead of wall time, and defaulting the cursor to wall clock would show 
 `POST /api/controls` takes `{service, entity, control, value, researcher}` and performs four
 checks **before** anything reaches the broker, then one after:
 
-1. the control exists for that service (`lib/controls.ts` catalogue, 12 RTA, 9 MHE, 6 OPG,
-   6 LWM);
+1. the control exists for that service (`lib/controls.ts` catalogue, 12 RTA, 9 MHE, 6 OPG);
 2. the entity is resolvable and the value is in range — the same validator the UI uses, so the
-   two cannot disagree (e.g. LWM sample interval 10–3600 s, MHE temperature 285–300 K, OPG
-   reserve 10–80%);
+   two cannot disagree (e.g. MHE temperature 285–300 K, OPG reserve 10–80%);
 3. the researcher code is cleared for that experiment (ARL `/v1/researchers/verify`);
 4. the broker is connected;
 5. the service acknowledges on `arl/<svc>/ack/<command_id>`.
@@ -353,11 +386,11 @@ retained `state` topic, which is what changes when the ack says `completed` (ver
 
 Workflow-oriented control, not a form per command:
 
-- **Presets** (`lib/presets.ts`): eleven multi-step researcher workflows — L-band survey,
+- **Presets** (`lib/presets.ts`): nine multi-step researcher workflows — L-band survey,
   stop observing, recover a hot dish, habitat night cycle, habitat work day, hydroponics crop
-  day, solar day, night watch, shortfall response, restore the soiling reference, service an
-  anemometer. A preset shows every step, resolves `@selected` to the entity the operator
-  picked, and runs them in order with each step's own ack.
+  day, solar day, night watch, shortfall response. A preset shows every step, resolves
+  `@selected` to the entity the operator picked, and runs them in order with each step's own
+  ack.
 - **Schedules**: `schedule_scan` takes a future timestamp; the UI refuses past times, and the
   service's `next_scan` state is shown so the operator can see the booking landed.
 - **Safeguards**: one-shot commands (`start_*`, `stop_*`, `cycle_airlock`, `seal_room`, ...)
@@ -372,13 +405,11 @@ Against the provided bundle (`127.0.0.1:1883`, same application code):
 
 | Command | Result |
 | --- | --- |
-| `LWM lwm-1 sample_interval=120` | `completed` — ack `{state:"completed", progress:1}`, `state/sample_interval_s` = 120 |
 | `RTA main set_observation_frequency=1420405752` | `completed` — `state/observation_frequency` = 1420405752 |
 | `MHE quarters-1 adjust_temperature=293` | `completed` — `state/setpoints.temperature_k` = 293 |
-| `LWM sample_interval=5` | `422` "Sample interval must be at least 10 s." (never published) |
-| `LWM ... researcher=nobody-99` | `403` "Researcher code 'nobody-99' is not registered with the ARL..." |
-| `RTA main start_generator` | `422` "'start_generator' is not a RTA control." |
+| `RTA main start_generator` | `422` "'start_generator' is not a RTA control." (never published) |
 | `OPG start_generator researcher=arl-as3` | `403` "arl-as3 is registered with the ARL but is not cleared for OPG." |
+| `RTA main set_observation_frequency=abc` | `422` "Observation frequency expects a number." (never published) |
 
 Against `wmc.ms.wits.ac.za` the same requests reach step 4 and then time out, because that
 broker does not distribute our publishes (section 3).
@@ -416,7 +447,7 @@ broker does not distribute our publishes (section 3).
 npm test
 ```
 
-Five files, 101 tests, all pure or against a throwaway SQLite database created by
+Five files, 97 tests, all pure or against a throwaway SQLite database created by
 `tests/global-setup.ts` (`prisma db push` into a temp file), so the suite never touches the
 captured lab data and needs no broker:
 
@@ -424,9 +455,9 @@ captured lab data and needs no broker:
 | --- | --- |
 | `tests/topics.test.ts` (15) | Topic parsing for every kind, prefix and case handling, builders, `stateValue`/`stateAt` |
 | `tests/ingest-rules.test.ts` (20) | Payload parsing (object/scalar/array/raw/oversize), timestamp acceptance and re-stamping, alert-event shaping, scan-context geometry |
-| `tests/alert-rules.test.ts` (31) | Alert identity, cause/message prose, status normalisation, status-at-cursor, guidance, and the derived rules for RTA/MHE/OPG/LWM |
+| `tests/alert-rules.test.ts` (27) | Alert identity, cause/message prose, status normalisation, status-at-cursor, guidance, and the derived rules for RTA/MHE/OPG |
 | `tests/persistence.test.ts` (21) | Real database: replay snapshot semantics, service scoping, alert dedupe/escalation, redelivery after a restart, acknowledge, resolve (note required, ack backfilled), auto-clear, the platform clock, audit entries, replay context |
-| `tests/catalogue.test.ts` (14) | Control catalogue and preset invariants: unique per service, every preset step resolves and validates, LWM bounds, enum/object validation, instrument-entity pinning |
+| `tests/catalogue.test.ts` (14) | Control catalogue and preset invariants: unique per service, every preset step resolves and validates, MHE setpoint bounds, enum/object validation, plant-command entity pinning |
 
 **Why this strategy.** The rules that decide what is kept, what is escalated and what is
 announced are the rules most likely to be wrong and the most expensive to test through a
@@ -444,13 +475,13 @@ service, which is what raises `service_telemetry_lost`.
 
 ## 12. Rubric evidence
 
-Service rubric (applied to RTA, MHE, OPG, LWM):
+Service rubric (applied to RTA, MHE, OPG):
 
 | Criterion | Level claimed | Evidence |
 | --- | --- | --- |
 | Data 30% | 100% | Every topic/field persisted (`Telemetry`, raw payload); batched writes with no drops at the lab's rate; 14-day retention; derived measures that answer researcher questions (section 6) |
-| Control 30% | 100% | All control surfaces catalogued and validated (12/9/6/6); completion and failure reported with reason/detail/topic; current vs target state shown; presets, schedules, confirmations, range checks and researcher pre-checks (section 9) |
-| Visualisation 30% | 100% | Graphical per-service views informed by service structure (dish grid, habitat layout, gauges, station comparison); drill-down (dish/room/station), comparison (sites, dishes, generation-vs-demand), correlation (gust vs stow limit, soiling vs yield) and derived answer panels |
+| Control 30% | 100% | All control surfaces catalogued and validated (12/9/6 across RTA/MHE/OPG); completion and failure reported with reason/detail/topic; current vs target state shown; presets, schedules, confirmations, range checks and researcher pre-checks (section 9) |
+| Visualisation 30% | 100% | Graphical per-service views informed by service structure (dish grid, habitat layout, gauges, generation-vs-demand chart, survey map); drill-down (dish/room), comparison (dishes, sources, generation vs demand) and correlation (temperature vs limit, wind stow vs availability) up to the derived answer panels; one space/Mars design language across canvas, SVG and charts |
 | Alerts 10% | 100% | Service alerts plus platform rules in one lifecycle with cause, value/limit, severity, entity and suggested action; annunciator always visible; persisted log with ack/resolve users and timestamps (section 7) |
 
 Exam rubric:
@@ -463,7 +494,7 @@ Exam rubric:
 | Alert system 10% | 100% | Annunciator on every page; acknowledge and resolve implemented; persistent log with raised/ack/resolve timestamps, users and cause; audit trail |
 | Replay 10% | 100% | Cursor selection, ordered playback of platform-captured data, play/pause, rewind, fast-forward, speed across all services; alerts and events re-rendered at the cursor |
 | UI/UX 2.5% | 100% | One consistent layout and navigation across services, no sign-in, alerts always visible, operator-prioritised ordering, degraded states designed (offline service, many alerts, permission denial, broker failure) |
-| Testing 2.5% | 100% | 101 tests run from this README covering parsing, alert rules, persistence and replay; strategy justified above; integration verified against the bundle with controls enabled and against the lab |
+| Testing 2.5% | 100% | 97 tests run from this README covering parsing, alert rules, persistence and replay; strategy justified above; integration verified against the bundle with controls enabled and against the lab |
 | Architecture 5% | 100% | Starts from this README; every endpoint, credential and path is an environment variable; modular (`lib/*`); shared shell, persistence and alert system reused; services plug in through the topic contract (section 5); batching, back pressure, reconnection and retention are reasoned |
 | Security 5% | 100% | Codes resolved via the ARL API per service, services access protected, ack/resolve attributed in `Alert` and `AuditLog`, decisions reasoned, no hard-coded credentials, input validated on every route |
 
@@ -480,5 +511,9 @@ Exam rubric:
 - **OWT (on-demand water treatment) is not implemented** — OPG is the chosen power/water
   service for the "best of" pair. Adding it would follow the five-step plugin procedure in
   section 5.
+- **LWM has no console by design.** It is still ingested, so its alerts reach the annunciator
+  and its samples replay, but the platform offers no page, controls or presets for it — a
+  decision made because its console duplicated RTA's wind story. `CONSOLE_SERVICES` in
+  `lib/types.ts` is the single switch that would bring a console back.
 - Only one researcher code exists on the lab, so multi-operator contention is not exercised
   beyond the attribution tests.

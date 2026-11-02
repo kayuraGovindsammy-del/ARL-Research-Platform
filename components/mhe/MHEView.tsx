@@ -11,6 +11,7 @@ import {
   summarizeRooms,
 } from "@/lib/mhe-selectors";
 import { useTelemetry } from "@/lib/telemetry-store";
+import { SERVICE_ACCENT } from "@/lib/theme";
 import {
   MHE_CO2_LIMIT_PPM,
   MHE_HEART_RATE_LIMIT_BPM,
@@ -21,6 +22,7 @@ import { useCommandRunner } from "@/lib/use-command";
 import { useNow } from "@/lib/use-now";
 import { useOperator } from "@/lib/use-operator";
 import { AlertAnnunciator } from "../AlertAnnunciator";
+import { ServiceHeader } from "../ServiceHeader";
 import { ConfirmButton } from "../ConfirmButton";
 import { InsightPanel } from "../InsightPanel";
 import { PermissionNote } from "../PermissionNote";
@@ -109,20 +111,18 @@ export function MHEView() {
     typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(value, 1), 10) : null;
 
   return (
-    <div className="space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-console-signal">
-            Service 02 · Mars Habitation Experiment
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-console-ink">
-            9-room habitat & crew wellbeing
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-console-muted">
-            Room environment every 5 minutes, crew vitals every minute, surveys twice per mission day.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+    <div
+      className="accent-scope space-y-4"
+      style={{ "--accent": SERVICE_ACCENT.MHE } as React.CSSProperties}
+    >
+      <ServiceHeader
+        index="02"
+        service="Mars Habitation Experiment"
+        title="9-room habitat & crew wellbeing"
+        blurb="Room environment every 5 minutes, crew vitals every minute, surveys twice per mission day."
+        accent="#ff7a45"
+        status={
+          <div className="flex flex-wrap items-center gap-2">
           <Badge tone="info">{habitat?.mode ? titleCase(String(habitat.mode)) : "habitat"}</Badge>
           <Badge tone="neutral">
             day {typeof habitat?.missionDay === "number" ? habitat.missionDay : "—"}
@@ -130,8 +130,9 @@ export function MHEView() {
           <Badge tone="neutral">{roomSummary.crewOnboard} crew onboard</Badge>
           <Badge tone="neutral">last telemetry {lastTelemetryAt ? timeAgo(lastTelemetryAt, now) : "—"}</Badge>
           {mode === "replay" && <Badge tone="warn">historical view</Badge>}
-        </div>
-      </header>
+          </div>
+        }
+      />
 
       <ReplayBar service="MHE" />
 

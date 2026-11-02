@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { CommandRequest } from "@/lib/api-client";
 import { presetsFor, presetNeedsSelection, type ControlPreset } from "@/lib/presets";
+import { SERVICE_ACCENT } from "@/lib/theme";
 import type { CommandResult, Service } from "@/lib/types";
 import { StepResult } from "./ConfirmButton";
 import { Badge, Modal, Panel } from "./ui";
@@ -72,6 +73,7 @@ export function PresetPanel({
   return (
     <Panel
       className={className}
+      accent={SERVICE_ACCENT[service]}
       title={title}
       subtitle="The sequences a researcher actually runs, with the preconditions and every step visible before you commit."
       actions={<Badge tone="neutral">{presets.length} presets</Badge>}

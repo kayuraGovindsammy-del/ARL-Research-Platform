@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge, Panel, ProgressBar, toneText, type Tone } from "./ui";
+import { Badge, Panel, ProgressBar, toneAccent, toneText, type Tone } from "./ui";
 
 export interface InsightEvidence {
   label: string;
@@ -48,6 +48,7 @@ export function InsightPanel({
       className={className}
       title="Research answer"
       subtitle={question}
+      accent={toneAccent[tone]}
       actions={<Badge tone={tone}>{tone === "ok" ? "nominal" : tone}</Badge>}
     >
       <p className={`text-base font-medium leading-snug ${answerTone}`}>{answer}</p>

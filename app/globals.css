@@ -1,9 +1,25 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Space + Mars theme.
+ *
+ * Three layers, back to front: a starfield that drifts very slowly, a nebula
+ * wash (violet on the left, ember on the right), and a horizon glow at the
+ * bottom of the viewport so the page feels like a habitat window looking out
+ * over the regolith. All three are fixed and pointer-transparent, so the
+ * operator's content never competes with the background.
+ */
 :root {
   color-scheme: dark;
+  --ember: 255 122 69;
+  --sun: 255 201 120;
+  --sand: 232 200 164;
+  --basalt: 20 15 13;
+  --edge: 51 35 29;
 }
 
 html,
@@ -13,25 +29,109 @@ body {
 
 body {
   @apply bg-console-void text-console-ink antialiased;
+  background-color: #07060c;
   background-image:
-    radial-gradient(circle at 12% -10%, rgba(56, 242, 195, 0.08), transparent 45%),
-    radial-gradient(circle at 88% 0%, rgba(103, 182, 255, 0.07), transparent 42%),
-    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
-  background-size: auto, auto, 32px 32px, 32px 32px;
+    radial-gradient(900px 620px at 8% -12%, rgba(111, 92, 255, 0.16), transparent 62%),
+    radial-gradient(760px 520px at 96% -6%, rgba(255, 122, 69, 0.13), transparent 60%),
+    radial-gradient(1100px 720px at 50% 118%, rgba(140, 59, 33, 0.24), transparent 68%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* Starfield: three dot grids at different scales drift against each other. */
+.starfield {
+  position: fixed;
+  inset: -20%;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1px 1px at 24px 38px, rgba(255, 255, 255, 0.85), transparent 100%),
+    radial-gradient(1px 1px at 122px 96px, rgba(255, 233, 214, 0.65), transparent 100%),
+    radial-gradient(1.4px 1.4px at 58px 156px, rgba(190, 205, 255, 0.7), transparent 100%),
+    radial-gradient(1px 1px at 176px 24px, rgba(255, 255, 255, 0.5), transparent 100%);
+  background-size: 220px 220px, 260px 260px, 340px 340px, 190px 190px;
+  mask-image: radial-gradient(circle at 50% 30%, black, transparent 82%);
+  animation: drift 140s linear infinite;
+  opacity: 0.55;
+}
+
+/* Mars horizon: a thin ember line with haze above it, pinned to the bottom. */
+.horizon {
+  position: fixed;
+  inset: auto 0 0 0;
+  height: 42vh;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 90% at 50% 130%, rgba(255, 122, 69, 0.18), rgba(140, 59, 33, 0.12) 42%, transparent 74%),
+    linear-gradient(to top, rgba(255, 122, 69, 0.06), transparent 55%);
+}
+
+.horizon::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 201, 120, 0.5), rgba(255, 122, 69, 0.35), transparent);
 }
 
 @layer components {
   .panel {
-    @apply rounded-xl border border-console-edge bg-console-panel/85 shadow-panel backdrop-blur;
+    @apply relative rounded-xl border border-console-edge/80 shadow-panel backdrop-blur;
+    background:
+      linear-gradient(180deg, rgba(29, 21, 18, 0.94), rgba(16, 12, 11, 0.92));
+  }
+
+  /* Ember filament along the top edge of every panel. */
+  .panel::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    border-radius: 999px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 122, 69, 0.55) 22%,
+      rgba(255, 201, 120, 0.75) 50%,
+      rgba(255, 122, 69, 0.55) 78%,
+      transparent
+    );
+    opacity: 0.7;
+  }
+
+  /* Service-tinted panel: set `--accent` inline or via a data attribute. */
+  .panel-accent::before {
+    height: 2px;
+    background: var(--accent, rgb(var(--ember)));
+    opacity: 0.9;
+    box-shadow: 0 0 18px -2px var(--accent, rgb(var(--ember)));
+  }
+
+  /*
+   * A console page sets `--accent` once on its root (`.accent-scope`), and every
+   * panel inside picks it up: the title chip, the top filament and the replay
+   * bar all carry the service colour without each panel naming it.
+   */
+  .accent-scope .panel:not(.panel-accent)::before {
+    background: linear-gradient(90deg, transparent, var(--accent) 28%, var(--accent) 72%, transparent);
+    opacity: 0.4;
   }
 
   .panel-header {
-    @apply flex flex-wrap items-center justify-between gap-3 border-b border-console-edge/70 px-4 py-3;
+    @apply flex flex-wrap items-center justify-between gap-3 border-b border-console-edge/60 px-4 py-3;
+    background: linear-gradient(180deg, rgba(255, 201, 120, 0.045), transparent);
   }
 
   .panel-title {
-    @apply text-[11px] font-semibold uppercase tracking-[0.18em] text-console-muted;
+    @apply flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-console-sand/85;
+  }
+
+  .panel-title::before {
+    content: "";
+    @apply inline-block h-1.5 w-1.5 shrink-0 rounded-[2px];
+    background: var(--accent, rgb(var(--ember)));
+    box-shadow: 0 0 10px var(--accent, rgb(var(--ember)));
   }
 
   .metric-value {
@@ -39,15 +139,31 @@ body {
   }
 
   .metric-label {
-    @apply text-[10px] font-semibold uppercase tracking-[0.16em] text-console-muted;
+    @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-console-muted;
+  }
+
+  .kicker {
+    @apply font-mono text-[10px] uppercase tracking-[0.32em] text-console-signal;
+  }
+
+  .hero-title {
+    @apply font-display text-3xl font-semibold tracking-tight text-console-ink sm:text-[2.1rem];
+    background: linear-gradient(100deg, #fdf5ec 10%, #ffc978 58%, #ff7a45 96%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .hairline {
+    @apply h-px w-full bg-gradient-to-r from-transparent via-console-edge to-transparent;
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-console-edge bg-console-grid/60 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-console-ink transition-colors hover:border-console-signal/60 hover:text-console-signal focus:outline-none focus-visible:ring-2 focus-visible:ring-console-signal/60 disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-console-edge bg-console-grid/70 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-console-sand/90 transition-colors hover:border-console-signal/70 hover:bg-console-rust/20 hover:text-console-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-console-signal/60 disabled:cursor-not-allowed disabled:opacity-40;
   }
 
   .btn-primary {
-    @apply border-console-signal/70 bg-console-signal/15 text-console-signal hover:bg-console-signal/25;
+    @apply border-console-signal/70 bg-console-signal/15 text-console-sand hover:bg-console-signal/25 hover:text-console-ink;
   }
 
   .btn-danger {
@@ -59,7 +175,7 @@ body {
   }
 
   .input {
-    @apply w-full rounded-md border border-console-edge bg-console-void/70 px-3 py-1.5 font-mono text-sm text-console-ink placeholder:text-console-muted/60 focus:border-console-signal/70 focus:outline-none focus:ring-1 focus:ring-console-signal/40;
+    @apply w-full rounded-md border border-console-edge bg-console-void/70 px-3 py-1.5 font-mono text-sm text-console-ink shadow-sunken placeholder:text-console-muted/60 focus:border-console-signal/70 focus:outline-none focus:ring-1 focus:ring-console-signal/40;
   }
 
   .label {
@@ -70,13 +186,17 @@ body {
     @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.12em];
   }
 
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-console-edge/80 bg-console-grid/60 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-console-muted;
+  }
+
   .table-cell {
     @apply whitespace-nowrap px-3 py-1.5 font-mono text-xs tabular-nums;
   }
 
   .scroll-thin {
     scrollbar-width: thin;
-    scrollbar-color: #243044 transparent;
+    scrollbar-color: #3a2820 transparent;
   }
 
   .scroll-thin::-webkit-scrollbar {
@@ -85,7 +205,7 @@ body {
   }
 
   .scroll-thin::-webkit-scrollbar-thumb {
-    background-color: #243044;
+    background-color: #3a2820;
     border-radius: 999px;
   }
 }
@@ -103,15 +223,15 @@ input[type="range"].scrubber {
 input[type="range"].scrubber::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #1c2533, #243044);
-  border: 1px solid #1c2533;
+  background: linear-gradient(90deg, #2a1d18, #3d2a22);
+  border: 1px solid #3a2820;
 }
 
 input[type="range"].scrubber::-moz-range-track {
   height: 6px;
   border-radius: 999px;
-  background: #1c2533;
-  border: 1px solid #1c2533;
+  background: #2a1d18;
+  border: 1px solid #3a2820;
 }
 
 input[type="range"].scrubber::-webkit-slider-thumb {
@@ -121,23 +241,28 @@ input[type="range"].scrubber::-webkit-slider-thumb {
   height: 16px;
   width: 16px;
   border-radius: 999px;
-  background: #38f2c3;
-  border: 2px solid #05070d;
-  box-shadow: 0 0 12px rgba(56, 242, 195, 0.7);
+  background: #ff7a45;
+  border: 2px solid #0a0809;
+  box-shadow: 0 0 12px rgba(255, 122, 69, 0.75);
 }
 
 input[type="range"].scrubber::-moz-range-thumb {
   height: 14px;
   width: 14px;
   border-radius: 999px;
-  background: #38f2c3;
-  border: 2px solid #05070d;
-  box-shadow: 0 0 12px rgba(56, 242, 195, 0.7);
+  background: #ff7a45;
+  border: 2px solid #0a0809;
+  box-shadow: 0 0 12px rgba(255, 122, 69, 0.75);
 }
 
 input[type="range"].scrubber:disabled::-webkit-slider-thumb {
-  background: #3c4a5e;
+  background: #4a372e;
   box-shadow: none;
+}
+
+::selection {
+  background: rgba(255, 122, 69, 0.35);
+  color: #fdf5ec;
 }
 
 @keyframes blink {
@@ -152,4 +277,16 @@ input[type="range"].scrubber:disabled::-webkit-slider-thumb {
 
 .blink {
   animation: blink 1.6s ease-in-out infinite;
+}
+
+/* An operator must never be dizzy: honour the motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  .starfield,
+  .blink {
+    animation: none;
+  }
+  [class*="animate-"] {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

@@ -12,7 +12,6 @@ import { alertStatusAt } from "@/lib/snapshot";
 import { deriveMheAlerts, type CrewEntry, type RoomEntry } from "@/lib/mhe-selectors";
 import { deriveOpgAlerts, computeTotals } from "@/lib/opg-selectors";
 import { deriveRtaAlerts, type DishSummary } from "@/lib/rta-selectors";
-import { deriveWeatherAlerts, summarizeWeather, type WeatherSite } from "@/lib/lwm-selectors";
 import { alertSeverity, RTA_MIN_OPERATIONAL_DISHES, type AlertRecord, type OpgPowerState } from "@/lib/types";
 
 /**
@@ -298,66 +297,6 @@ describe("MHE derived alerts", () => {
     expect(messages.some((message) => message.includes("heart rate"))).toBe(true);
     expect(messages.some((message) => message.includes("SpO₂"))).toBe(true);
     expect(messages.some((message) => message.includes("survey overdue"))).toBe(true);
-  });
-});
-
-describe("LWM derived alerts", () => {
-  const site = (overrides: Partial<WeatherSite> = {}): WeatherSite => ({
-    id: "lwm-1",
-    weather: {
-      temperatureC: 28,
-      humidityPct: 40,
-      pressureHpa: 870,
-      windSpeedMs: 6,
-      windGustMs: 9,
-      windDirectionDeg: 90,
-      irradianceWm2: 800,
-      rainfallMm: 0,
-      lightningStrikes: 0,
-      batteryV: 12.6,
-      status: true,
-    },
-    position: { lat: -26.19, lon: 28.03 },
-    enabled: true,
-    sampleIntervalS: 60,
-    lastCalibrationAt: null,
-    sonic: null,
-    soiling: null,
-    pan: null,
-    timestamp: new Date().toISOString(),
-    ...overrides,
-  });
-
-  it("is silent under a normal sky", () => {
-    const sites = [site()];
-    expect(deriveWeatherAlerts(sites, summarizeWeather(sites))).toEqual([]);
-  });
-
-  it("raises the stow alert when a gust reaches the array's limit", () => {
-    const sites = [site()];
-    sites[0].weather!.windGustMs = 16;
-    const alerts = deriveWeatherAlerts(sites, summarizeWeather(sites));
-    expect(alerts[0].tone).toBe("alert");
-    expect(alerts[0].message).toContain("stows");
-  });
-
-  it("warns when a gust is within 20 % of the limit", () => {
-    const sites = [site()];
-    sites[0].weather!.windGustMs = 13;
-    const alerts = deriveWeatherAlerts(sites, summarizeWeather(sites));
-    expect(alerts[0].tone).toBe("warn");
-    expect(alerts[0].message).toContain("within 20 %");
-  });
-
-  it("warns about a dirty reference cell, a low battery and a dead station", () => {
-    const sites = [site()];
-    sites[0].soiling = { soiling_ratio: 0.72 } as never;
-    sites[0].weather!.batteryV = 11.2;
-    sites[0].weather!.status = false;
-    const messages = deriveWeatherAlerts(sites, summarizeWeather(sites)).map((alert) => alert.message);
-    expect(messages.some((message) => message.includes("Soiling"))).toBe(true);
-    expect(messages.some((message) => message.includes("station battery"))).toBe(true);
-    expect(messages.some((message) => message.includes("unhealthy"))).toBe(true);
   });
 });
 

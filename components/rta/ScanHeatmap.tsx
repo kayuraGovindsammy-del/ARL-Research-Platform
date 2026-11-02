@@ -33,13 +33,13 @@ const CANVAS_W = 640;
 const CANVAS_H = 640;
 const PAD = { left: 44, right: 96, top: 12, bottom: 28 };
 
-/** Deep-space → teal → signal → solar. */
+/** Void → cold regolith → rust → ember → sunlit sand: Mars, at night to noon. */
 const STOPS: Array<[number, [number, number, number]]> = [
-  [0, [10, 20, 32]],
-  [0.25, [14, 68, 94]],
-  [0.5, [14, 124, 102]],
-  [0.75, [56, 242, 195]],
-  [1, [255, 209, 102]],
+  [0, [12, 10, 13]],
+  [0.25, [58, 34, 30]],
+  [0.5, [148, 58, 34]],
+  [0.75, [255, 122, 69]],
+  [1, [255, 224, 178]],
 ];
 
 function colorAt(t: number): [number, number, number] {
@@ -119,9 +119,9 @@ function drawImage(
   const plotH = CANVAS_H - PAD.top - PAD.bottom;
 
   context.clearRect(0, 0, CANVAS_W, CANVAS_H);
-  context.fillStyle = "#070b13";
+  context.fillStyle = "#07060c";
   context.fillRect(0, 0, CANVAS_W, CANVAS_H);
-  context.fillStyle = "#0a101a";
+  context.fillStyle = "#0f0b0c";
   context.fillRect(PAD.left, PAD.top, plotW, plotH);
 
   const { size } = image.geometry;
@@ -160,7 +160,7 @@ function drawImage(
   }
 
   // Grid + frame.
-  context.strokeStyle = "rgba(124, 140, 163, 0.14)";
+  context.strokeStyle = "rgba(232, 200, 164, 0.10)";
   context.lineWidth = 1;
   for (let index = 0; index <= 4; index += 1) {
     const x = PAD.left + (plotW / 4) * index;
@@ -174,12 +174,12 @@ function drawImage(
     context.lineTo(PAD.left + plotW, y);
     context.stroke();
   }
-  context.strokeStyle = "rgba(124, 140, 163, 0.35)";
+  context.strokeStyle = "rgba(232, 200, 164, 0.28)";
   context.strokeRect(PAD.left, PAD.top, plotW, plotH);
 
   // Axis labels: offsets in degrees, north at the top.
   const halfDeg = (image.geometry.fovRad / 2) * (180 / Math.PI);
-  context.fillStyle = "#7d8ca3";
+  context.fillStyle = "#a89285";
   context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
   context.textBaseline = "middle";
   context.textAlign = "right";
@@ -203,16 +203,16 @@ function drawImage(
   gradient.addColorStop(1, cssColor(1));
   context.fillStyle = gradient;
   context.fillRect(legendX, legendY, legendW, legendH);
-  context.strokeStyle = "rgba(124, 140, 163, 0.4)";
+  context.strokeStyle = "rgba(232, 200, 164, 0.35)";
   context.strokeRect(legendX, legendY, legendW, legendH);
-  context.fillStyle = "#7d8ca3";
+  context.fillStyle = "#a89285";
   context.textAlign = "left";
   context.textBaseline = "middle";
   context.fillText(stats.max.toFixed(2), legendX + legendW + 6, legendY);
   context.fillText(stats.min.toFixed(2), legendX + legendW + 6, legendY + legendH);
 
   if (stats.filled === 0) {
-    context.fillStyle = "rgba(230, 237, 247, 0.55)";
+    context.fillStyle = "rgba(246, 236, 225, 0.55)";
     context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
     context.textAlign = "center";
     context.textBaseline = "middle";
@@ -402,9 +402,9 @@ export function ScanHeatmap({
       const context = canvas.getContext("2d");
       if (!context) return;
       context.clearRect(0, 0, CANVAS_W, CANVAS_H);
-      context.fillStyle = "#070b13";
+      context.fillStyle = "#07060c";
       context.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      context.fillStyle = "rgba(230, 237, 247, 0.55)";
+      context.fillStyle = "rgba(246, 236, 225, 0.55)";
       context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
       context.textAlign = "center";
       context.textBaseline = "middle";

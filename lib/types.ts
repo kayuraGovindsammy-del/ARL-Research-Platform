@@ -14,7 +14,15 @@
 export const SERVICES = ["RTA", "MHE", "OPG", "LWM"] as const;
 export type Service = (typeof SERVICES)[number];
 
-/** Services we ingest — the same four the platform renders. */
+/**
+ * Services with a console. LWM is still ingested (its alerts reach the
+ * annunciator and its samples replay), but the platform does not render a
+ * console for it, so it has no controls or presets.
+ */
+export const CONSOLE_SERVICES = ["RTA", "MHE", "OPG"] as const;
+export type ConsoleService = (typeof CONSOLE_SERVICES)[number];
+
+/** Services we ingest — one more than the ones we render. */
 export const INGEST_SERVICES = ["RTA", "MHE", "OPG", "LWM"] as const;
 export type IngestService = (typeof INGEST_SERVICES)[number];
 
@@ -632,62 +640,3 @@ export interface ArlParameter {
   description?: string;
   [key: string]: unknown;
 }
-
-// ---------------------------------------------------------------------------
-// LWM — Local Weather Monitoring
-// ---------------------------------------------------------------------------
-
-/**
- * `arl/lwm/<site>/telemetry/weather` (wire shape).
- *
- * Five sites report once a minute. This is the lab's eye on the sky: the gust
- * figure is what puts the array into wind stow, and the irradiance figure is
- * what the power plant's solar prediction is built from.
- */
-export interface LwmWeatherSample {
-  temperature_k?: number | null;
-  humidity_pct?: number | null;
-  pressure_hpa?: number | null;
-  wind_speed_ms?: number | null;
-  wind_gust_ms?: number | null;
-  wind_direction_rad?: number | null;
-  irradiance_wm2?: number | null;
-  rainfall_mm?: number | null;
-  lightning_strikes?: number | null;
-  battery_v?: number | null;
-  status?: boolean | null;
-}
-
-/** `arl/lwm/lwm-3/telemetry/sonic` — turbulence-grade wind at the sonic site. */
-export interface LwmSonicSample {
-  wind_u_ms?: number | null;
-  wind_v_ms?: number | null;
-  wind_w_ms?: number | null;
-  gust_factor?: number | null;
-  turbulence_intensity?: number | null;
-  direction_std_rad?: number | null;
-  sonic_temperature_k?: number | null;
-}
-
-/** `arl/lwm/lwm-4/telemetry/soiling` — panel soiling ratio at the PV reference site. */
-export interface LwmSoilingSample {
-  exposed_irradiance_wm2?: number | null;
-  reference_irradiance_wm2?: number | null;
-  soiling_ratio?: number | null;
-}
-
-/** `arl/lwm/lwm-5/telemetry/pan` — evaporation pan, the water-budget site. */
-export interface LwmPanSample {
-  evaporation_mm?: number | null;
-  pan_level_mm?: number | null;
-}
-
-/** `arl/lwm/global/telemetry/lightning` */
-export interface LwmLightningSample {
-  strikes_last_min?: number | null;
-  nearest_strike_km?: number | null;
-}
-
-/** Gust at which the array stows, and the margin the weather console warns at. */
-export const LWM_SOILING_WARN_RATIO = 0.9;
-export const LWM_BATTERY_LOW_V = 11.8;

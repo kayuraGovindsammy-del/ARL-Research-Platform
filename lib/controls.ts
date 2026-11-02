@@ -325,64 +325,7 @@ export const CONTROLS: ControlSpec[] = [
     description: "Stops the diesel generator after a 60 s cool-down.",
   },
 
-  // ---------------------------------------------------------------- LWM ----
-  {
-    service: "LWM",
-    control: "enable_site",
-    entityKind: "site",
-    valueType: "bool",
-    label: "Enable station",
-    description: "Brings a weather station into or out of the reporting set.",
-  },
-  {
-    service: "LWM",
-    control: "sample_interval",
-    entityKind: "site",
-    valueType: "float",
-    unit: "s",
-    min: 10,
-    max: 3600,
-    label: "Sample interval",
-    description: "Seconds between weather samples at this station (10–3600 s).",
-  },
-  {
-    service: "LWM",
-    control: "request_recalibration",
-    entityKind: "site",
-    valueType: "bool",
-    mustBeTrue: true,
-    label: "Request recalibration",
-    description: "Recalibrates the station's sensors against their references.",
-  },
-  {
-    service: "LWM",
-    control: "service_anemometer",
-    entityKind: "site",
-    valueType: "bool",
-    mustBeTrue: true,
-    label: "Service anemometer",
-    description: "Services the wind sensor; that station reports no gusts while it runs.",
-  },
-  {
-    service: "LWM",
-    control: "clean_reference_cell",
-    entityKind: "site",
-    entity: "lwm-4",
-    valueType: "bool",
-    mustBeTrue: true,
-    label: "Clean reference cell",
-    description: "Cleans the soiling reference cell, restoring the soiling ratio to 1.0.",
-  },
-  {
-    service: "LWM",
-    control: "refill_pan",
-    entityKind: "site",
-    entity: "lwm-5",
-    valueType: "bool",
-    mustBeTrue: true,
-    label: "Refill evaporation pan",
-    description: "Refills the evaporation pan to its working level.",
-  },
+
 ];
 
 /** What the `entity` path segment must be for each kind of control. */

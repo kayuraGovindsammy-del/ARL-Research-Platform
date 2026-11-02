@@ -47,25 +47,26 @@ const DOORS: Array<[number, number, number, number]> = [
   [680, 435, 680, 465],
 ];
 
+/* Habitat deck colours: warm basalt rooms, ember for anything off-nominal. */
 const TONE_FILL: Record<Tone, string> = {
-  ok: "rgba(56, 242, 195, 0.05)",
-  warn: "rgba(255, 171, 74, 0.12)",
-  alert: "rgba(255, 93, 93, 0.14)",
-  neutral: "rgba(125, 140, 163, 0.04)",
+  ok: "rgba(255, 201, 120, 0.05)",
+  warn: "rgba(255, 161, 75, 0.12)",
+  alert: "rgba(255, 75, 62, 0.14)",
+  neutral: "rgba(168, 146, 133, 0.04)",
 };
 
 const TONE_STROKE: Record<Tone, string> = {
-  ok: "#22303f",
-  warn: "#ffab4a",
-  alert: "#ff5d5d",
-  neutral: "#1c2533",
+  ok: "#4a3427",
+  warn: "#ffa14b",
+  alert: "#ff4b3e",
+  neutral: "#33231d",
 };
 
 const TONE_INK: Record<Tone, string> = {
-  ok: "#e6edf7",
+  ok: "#f6ece1",
   warn: "#ffd9a8",
   alert: "#ffc2c2",
-  neutral: "#7d8ca3",
+  neutral: "#a89285",
 };
 
 function roomTone(room: RoomEntry | undefined): Tone {
@@ -108,7 +109,7 @@ export function HabitatLayout({
         role="group"
         aria-label="Mars Habitation Experiment floorplan"
       >
-        <rect x={30} y={30} width={660} height={500} rx={12} fill="none" stroke="#2b3b4d" strokeWidth={4} />
+        <rect x={30} y={30} width={660} height={500} rx={12} fill="none" stroke="#4a3427" strokeWidth={4} />
 
         {ROOMS.map((box) => {
           const room = byId.get(box.id);
@@ -142,7 +143,7 @@ export function HabitatLayout({
                 height={box.h}
                 rx={4}
                 fill={TONE_FILL[tone]}
-                stroke={selected ? "#38f2c3" : TONE_STROKE[tone]}
+                stroke={selected ? "#ffc978" : TONE_STROKE[tone]}
                 strokeWidth={selected ? 3 : 1.5}
                 strokeDasharray={tone === "neutral" && !room ? "5 4" : undefined}
               />
@@ -151,7 +152,7 @@ export function HabitatLayout({
                 x={box.x + 10}
                 y={box.y + 22}
                 fontSize={compact ? 10 : 11}
-                fill="#7d8ca3"
+                fill="#a89285"
                 letterSpacing={0.8}
                 className="font-mono uppercase"
               >
@@ -159,7 +160,7 @@ export function HabitatLayout({
               </text>
 
               <circle cx={box.x + box.w - 14} cy={box.y + 18} r={3.5} fill={
-                tone === "alert" ? "#ff5d5d" : tone === "warn" ? "#ffab4a" : tone === "ok" ? "#4ade80" : "#43505f"
+                tone === "alert" ? "#ff4b3e" : tone === "warn" ? "#ffa14b" : tone === "ok" ? "#5fd39b" : "#5a4033"
               } />
 
               <text
@@ -172,7 +173,7 @@ export function HabitatLayout({
                 {typeof telemetry?.temperatureC === "number"
                   ? formatNumber(telemetry.temperatureC, 1)
                   : "—"}
-                <tspan fontSize={compact ? 11 : 14} fill="#7d8ca3">
+                <tspan fontSize={compact ? 11 : 14} fill="#a89285">
                   {" °C"}
                 </tspan>
               </text>
@@ -181,7 +182,7 @@ export function HabitatLayout({
                 x={box.x + 12}
                 y={box.y + (compact ? 76 : 104)}
                 fontSize={10}
-                fill="#7d8ca3"
+                fill="#a89285"
                 className="font-mono"
               >
                 {`co₂ ${typeof telemetry?.co2Ppm === "number" ? Math.round(telemetry.co2Ppm) : "—"} ppm`}
@@ -190,7 +191,7 @@ export function HabitatLayout({
                 x={box.x + 12}
                 y={box.y + (compact ? 92 : 120)}
                 fontSize={10}
-                fill="#7d8ca3"
+                fill="#a89285"
                 className="font-mono"
               >
                 {`o₂ ${formatNumber(telemetry?.o2Pct, 1)} % · ${typeof telemetry?.lightingLux === "number" ? Math.round(telemetry.lightingLux) : "—"} lx`}
@@ -201,7 +202,7 @@ export function HabitatLayout({
                   x={box.x + 12}
                   y={box.y + (compact ? 108 : box.h - 44)}
                   fontSize={10}
-                  fill="#7d8ca3"
+                  fill="#a89285"
                   className="font-mono"
                 >
                   {airlock ?? `${telemetry?.crewCount ?? 0} crew`}
@@ -213,7 +214,7 @@ export function HabitatLayout({
                   x={box.x + 12}
                   y={box.y + box.h - 26}
                   fontSize={10}
-                  fill="#7d8ca3"
+                  fill="#a89285"
                   className="font-mono"
                 >
                   {telemetry ? `${formatNumber(telemetry.humidityPct, 0)} % rh · ${formatNumber(telemetry.pressureKpa, 1)} kPa` : ""}
@@ -230,7 +231,7 @@ export function HabitatLayout({
             y1={y1}
             x2={x2}
             y2={y2}
-            stroke="#0b1018"
+            stroke="#120d0c"
             strokeWidth={6}
             pointerEvents="none"
           />

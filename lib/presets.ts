@@ -197,53 +197,7 @@ export const PRESETS: ControlPreset[] = [
     ],
   },
 
-  // ---------------------------------------------------------------- LWM ---
-  {
-    id: "lwm-clean-reference",
-    service: "LWM",
-    name: "Restore the soiling reference",
-    rationale:
-      "A soiling ratio below 0.9 means the reference cell is dirty, not that the sun dimmed. Cleaning it and then recalibrating restores the pair the solar yield is measured against.",
-    requires: "The reference cell must not be mid-clean already.",
-    steps: [
-      {
-        control: "clean_reference_cell",
-        entity: "lwm-4",
-        value: true,
-        label: "Clean the reference cell",
-        critical: true,
-      },
-      {
-        control: "request_recalibration",
-        entity: "lwm-4",
-        value: true,
-        label: "Recalibrate the reference cell",
-      },
-    ],
-  },
-  {
-    id: "lwm-service-anemometer",
-    service: "LWM",
-    name: "Service an anemometer",
-    rationale:
-      "A stuck or drifting anemometer is how the array ends up stowing late. Servicing it and then recalibrating the station is the sequence an instrument technician runs.",
-    requires: "Select the affected station first; no gust data is published while the service runs.",
-    steps: [
-      {
-        control: "service_anemometer",
-        entity: "@selected",
-        value: true,
-        label: "Service the anemometer",
-        critical: true,
-      },
-      {
-        control: "request_recalibration",
-        entity: "@selected",
-        value: true,
-        label: "Recalibrate the station",
-      },
-    ],
-  },
+
 ];
 
 export function presetsFor(service: Service): ControlPreset[] {

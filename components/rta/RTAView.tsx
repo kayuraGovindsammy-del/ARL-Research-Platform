@@ -12,6 +12,7 @@ import {
   summarizeDishes,
 } from "@/lib/rta-selectors";
 import { useTelemetry } from "@/lib/telemetry-store";
+import { SERVICE_ACCENT } from "@/lib/theme";
 import {
   RTA_DISH_TEMP_WARN_C,
   RTA_MIN_OPERATIONAL_DISHES,
@@ -21,6 +22,7 @@ import {
 import { useCommandRunner } from "@/lib/use-command";
 import { useOperator } from "@/lib/use-operator";
 import { AlertAnnunciator } from "../AlertAnnunciator";
+import { ServiceHeader } from "../ServiceHeader";
 import { ConfirmButton } from "../ConfirmButton";
 import { InsightPanel } from "../InsightPanel";
 import { PermissionNote } from "../PermissionNote";
@@ -180,21 +182,23 @@ export function RTAView() {
   ) => run({ service: "RTA", entity, control, value, researcher: operator }, label);
 
   return (
-    <div className="space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-console-signal">
-            Service 01 · Radio Telescope Array
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-console-ink">
-            100-dish array control
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-console-muted">
+    <div
+      className="accent-scope space-y-4"
+      style={{ "--accent": SERVICE_ACCENT.RTA } as React.CSSProperties}
+    >
+      <ServiceHeader
+        index="01"
+        service="Radio Telescope Array"
+        title="100-dish array control"
+        blurb={
+          <>
             Dish metrics refresh every 2 minutes; scans stream a 1 Hz sample per dish for the
             composite map. Sub-arrays default to <span className="font-mono text-console-ink">main</span>.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+          </>
+        }
+        accent="#ffc978"
+        status={
+          <div className="flex flex-wrap items-center gap-2">
           <Badge tone={SCAN_TONE[scanStatus] ?? "neutral"}>
             <StatusDot tone={SCAN_TONE[scanStatus] ?? "neutral"} pulse={scanning} />
             {scanStatus}
@@ -202,8 +206,9 @@ export function RTAView() {
           <Badge tone="info">target {activeTargetLabel}</Badge>
           <Badge tone="neutral">last telemetry {lastTelemetryAt ? timeAgo(lastTelemetryAt) : "—"}</Badge>
           {mode === "replay" && <Badge tone="warn">historical view</Badge>}
-        </div>
-      </header>
+          </div>
+        }
+      />
 
       <ReplayBar service="RTA" />
 
@@ -275,7 +280,7 @@ export function RTAView() {
             label: "Wind stow",
             value: windStow ? "engaged" : "clear",
             tone: windStow ? "alert" : "ok",
-            hint: `stows at ${RTA_WIND_STOW_LIMIT_MS} m/s gust (LWM)`,
+            hint: `stows at ${RTA_WIND_STOW_LIMIT_MS} m/s gust`,
           },
         ]}
         footnote="Read this before touching the controls: a scan on a degraded array still produces an image, it just produces a worse one."

@@ -4,10 +4,12 @@ import { useMemo, useState } from "react";
 import { guidanceFor, severityRank } from "@/lib/alert-guidance";
 import { formatDateTime, formatNumber, timeAgo, titleCase } from "@/lib/format";
 import { useTelemetry } from "@/lib/telemetry-store";
+import { THEME } from "@/lib/theme";
 import { alertSeverity, type AlertRecord, type AlertStatus } from "@/lib/types";
 import { useNow } from "@/lib/use-now";
 import { AlertActionModal, describeEvent } from "./AlertAnnunciator";
 import { ReplayBar } from "./ReplayBar";
+import { ServiceHeader } from "./ServiceHeader";
 import { Badge, EmptyState, Metric, Panel, StatusDot, type Tone } from "./ui";
 
 const STATUS_TONE: Record<AlertStatus, Tone> = {
@@ -128,34 +130,31 @@ export function AlertLogView() {
   const unresolved = counts.ACTIVE + counts.ACKNOWLEDGED;
 
   return (
-    <div className="space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-console-signal">
-            Platform · alert system
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-console-ink">
-            Alert log & resolution record
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-console-muted">
-            Every alert raised by any service, with the cause that fired it and the
-            acknowledge/resolve audit trail. The annunciators on each console show what is live now;
-            this page is the record you investigate later.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge tone={counts.ACTIVE > 0 ? "alert" : "ok"}>
-            <StatusDot tone={counts.ACTIVE > 0 ? "alert" : "ok"} pulse={counts.ACTIVE > 0} />
-            {counts.ACTIVE} active
-          </Badge>
-          <Badge tone={counts.ACKNOWLEDGED > 0 ? "warn" : "neutral"}>
-            {counts.ACKNOWLEDGED} acknowledged
-          </Badge>
-          <Badge tone="neutral">{counts.RESOLVED} resolved</Badge>
-          {readOnly && <Badge tone="warn">replay</Badge>}
-          {error && <Badge tone="warn">sync issue</Badge>}
-        </div>
-      </header>
+    <div
+      className="accent-scope space-y-4"
+      style={{ "--accent": THEME.alert } as React.CSSProperties}
+    >
+      <ServiceHeader
+        index="04"
+        service="Platform"
+        title="Alert log & resolution record"
+        accent={counts.ACTIVE > 0 ? THEME.alert : THEME.warn}
+        blurb="Every alert raised by any service, with the cause that fired it and the acknowledge/resolve audit trail. The annunciators on each console show what is live now; this page is the record you investigate later."
+        status={
+          <>
+            <Badge tone={counts.ACTIVE > 0 ? "alert" : "ok"}>
+              <StatusDot tone={counts.ACTIVE > 0 ? "alert" : "ok"} pulse={counts.ACTIVE > 0} />
+              {counts.ACTIVE} active
+            </Badge>
+            <Badge tone={counts.ACKNOWLEDGED > 0 ? "warn" : "neutral"}>
+              {counts.ACKNOWLEDGED} acknowledged
+            </Badge>
+            <Badge tone="neutral">{counts.RESOLVED} resolved</Badge>
+            {readOnly && <Badge tone="warn">replay</Badge>}
+            {error && <Badge tone="warn">sync issue</Badge>}
+          </>
+        }
+      />
 
       <ReplayBar />
 

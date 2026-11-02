@@ -106,30 +106,38 @@ export function OverviewView() {
     opg.totals.demandKw > 0 ? (opg.totals.producedKw / opg.totals.demandKw) * 100 : 0;
 
   return (
-    <div className="space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-console-signal">
-            Astro-Research Laboratory · Operations Overview
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-console-ink">Mission control</h1>
-          <p className="mt-1 max-w-2xl text-sm text-console-muted">
-            One ingestion pipeline (MQTT → SQLite → SSE) feeding three service consoles, with
-            historical replay and audited alert handling.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge tone={activeAlerts > 0 ? "alert" : "ok"}>
-            <StatusDot tone={activeAlerts > 0 ? "alert" : "ok"} pulse={activeAlerts > 0} />
-            {activeAlerts} active alert{activeAlerts === 1 ? "" : "s"}
-          </Badge>
-          <Badge tone={mode === "replay" ? "warn" : "info"}>
-            {mode === "replay" ? "historical view" : `stream ${connection}`}
-          </Badge>
-          <Badge tone="neutral">{topicCount} topics</Badge>
-          <Badge tone="neutral">
-            last telemetry {lastTelemetryAt ? timeAgo(lastTelemetryAt, now) : "—"}
-          </Badge>
+    <div className="space-y-5">
+      <header className="relative overflow-hidden rounded-xl border border-console-edge/70 bg-console-panel/60 px-5 py-5 shadow-panel">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(720px 320px at 88% -40%, rgba(255,122,69,0.20), transparent 70%), radial-gradient(520px 260px at 4% 120%, rgba(111,92,255,0.14), transparent 72%)",
+          }}
+        />
+        <div className="relative flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <p className="kicker">Astro-Research Laboratory · Mars analogue station</p>
+            <h1 className="hero-title mt-2">Mission control</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-console-muted">
+              One ingestion pipeline (MQTT → SQLite → SSE) feeding three service consoles, with
+              historical replay and audited alert handling.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={activeAlerts > 0 ? "alert" : "ok"}>
+              <StatusDot tone={activeAlerts > 0 ? "alert" : "ok"} pulse={activeAlerts > 0} />
+              {activeAlerts} active alert{activeAlerts === 1 ? "" : "s"}
+            </Badge>
+            <Badge tone={mode === "replay" ? "warn" : "info"}>
+              {mode === "replay" ? "historical view" : `stream ${connection}`}
+            </Badge>
+            <span className="chip">{topicCount} topics</span>
+            <span className="chip">
+              last telemetry {lastTelemetryAt ? timeAgo(lastTelemetryAt, now) : "—"}
+            </span>
+          </div>
         </div>
       </header>
 
@@ -145,6 +153,7 @@ export function OverviewView() {
         <Panel
           title="Radio Telescope Array"
           subtitle="100 dishes, sub-array targeting and 1 Hz scan heatmap."
+          accent="#ffc978"
           actions={<OpenLink href="/rta" />}
         >
           <div className="grid gap-2 sm:grid-cols-2">
@@ -196,6 +205,7 @@ export function OverviewView() {
         <Panel
           title="Mars Habitation Experiment"
           subtitle="9-room habitat, crew vitals and twice-daily surveys."
+          accent="#ff7a45"
           actions={<OpenLink href="/mhe" />}
         >
           <div className="grid gap-2 sm:grid-cols-2">
@@ -243,6 +253,7 @@ export function OverviewView() {
         <Panel
           title="On-Demand Power Generation"
           subtitle="Solar, battery and diesel plant with load-shedding authority."
+          accent="#8ab4ff"
           actions={<OpenLink href="/opg" />}
         >
           <div className="grid gap-2 sm:grid-cols-2">
@@ -292,7 +303,8 @@ export function OverviewView() {
       <Panel
         title="ARL campus"
         subtitle="Facility footprints and the 100-dish phase-1 array, projected from the supplied arl.geojson."
-        actions={<Badge tone="neutral">campus site plan</Badge>}
+        accent="#e8c8a4"
+        actions={<span className="chip">campus site plan</span>}
       >
         <LabMap />
       </Panel>

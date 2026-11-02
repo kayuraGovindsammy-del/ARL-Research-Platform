@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CONTROLS, controlsFor, getControl, validateControlValue } from "@/lib/controls";
 import { PRESETS, presetNeedsSelection, presetsFor } from "@/lib/presets";
-import { SERVICES } from "@/lib/types";
+import { CONSOLE_SERVICES } from "@/lib/types";
 
 /**
  * Architecture and Control, tested as invariants rather than by inspection.
@@ -14,7 +14,7 @@ import { SERVICES } from "@/lib/types";
 
 describe("control catalogue", () => {
   it("covers every service the platform renders", () => {
-    for (const service of SERVICES) {
+    for (const service of CONSOLE_SERVICES) {
       expect(controlsFor(service).length, `${service} has no controls`).toBeGreaterThan(0);
     }
   });
@@ -35,13 +35,13 @@ describe("control catalogue", () => {
     }
   });
 
-  it("bounds the sample interval at both ends", () => {
-    const spec = getControl("LWM", "sample_interval");
+  it("bounds the habitat temperature setpoint at both ends", () => {
+    const spec = getControl("MHE", "adjust_temperature");
     expect(spec).not.toBeNull();
-    expect(validateControlValue(spec!, 60, "lwm-1")).toBeNull();
-    expect(validateControlValue(spec!, 5, "lwm-1")).toContain("at least");
-    expect(validateControlValue(spec!, 7200, "lwm-1")).toContain("at most");
-    expect(validateControlValue(spec!, "60", "lwm-1")).toContain("number");
+    expect(validateControlValue(spec!, 293, "quarters-1")).toBeNull();
+    expect(validateControlValue(spec!, 250, "quarters-1")).toContain("at least");
+    expect(validateControlValue(spec!, 320, "quarters-1")).toContain("at most");
+    expect(validateControlValue(spec!, "293", "quarters-1")).toContain("number");
   });
 
   it("only accepts booleans for a boolean control, and true for a one-shot", () => {
@@ -79,11 +79,12 @@ describe("control catalogue", () => {
     expect(validateControlValue(spec, { ra_rad: 9, dec_rad: 0, fov_rad: 0.02 }, "main")).toContain("ra_rad");
   });
 
-  it("restricts the LWM instrument commands to the station that carries the instrument", () => {
-    const clean = getControl("LWM", "clean_reference_cell")!;
-    const refill = getControl("LWM", "refill_pan")!;
-    expect(clean.entity).toBe("lwm-4");
-    expect(refill.entity).toBe("lwm-5");
+  it("pins plant-level commands to the unit they act on", () => {
+    // The diesel plant is a single unit, so its commands carry a fixed entity
+    // rather than accepting whatever the operator typed.
+    for (const control of ["start_generator", "stop_generator"]) {
+      expect(getControl("OPG", control)?.entity, control).toBe("diesel");
+    }
   });
 });
 
@@ -115,7 +116,7 @@ describe("presets", () => {
   });
 
   it("groups presets by service, so a console only shows its own", () => {
-    for (const service of SERVICES) {
+    for (const service of CONSOLE_SERVICES) {
       expect(presetsFor(service).length, `${service} has no presets`).toBeGreaterThan(0);
       expect(presetsFor(service).every((preset) => preset.service === service)).toBe(true);
     }
