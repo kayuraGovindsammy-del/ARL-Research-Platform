@@ -1,21 +1,36 @@
 import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
-import { AlertRuleEngine, extractPayloadAlertFlags } from "./alert-rules";
-import { raiseAlerts } from "./alerts";
+import { clearServiceAlert, raiseServiceAlert, type ServiceAlertEvent } from "./alerts";
 import { env, mqttBrokerUrl } from "./env";
-import { publishTelemetry, publishWorkerStatus } from "./events";
+import {
+  publishAck,
+  publishCommandResult,
+  publishServiceEvent,
+  publishTelemetry,
+  publishWorkerStatus,
+} from "./events";
 import { prisma, withDbRetry } from "./prisma";
+import { scanTargetLabel } from "./rta-selectors";
 import { commandTopic, parseTopic, telemetryWildcard } from "./topics";
-import type { AlertFlag, CommandEnvelope, Service, TelemetryEvent } from "./types";
+import type {
+  CommandAck,
+  CommandOutcome,
+  CommandResult,
+  IngestService,
+  RtaScanContext,
+  TelemetryEvent,
+  Topology,
+} from "./types";
 
 /**
  * In-memory MQTT ingestion worker.
  *
  * Responsibilities:
  *  - one persistent client per server process (pinned on `globalThis`)
- *  - subscribe to the whole `arl/#` tree and fan messages into SQLite
- *  - emit every persisted sample on the global telemetryEmitter (SSE source)
- *  - evaluate alert threshold rules and persist new alerts
- *  - publish operator commands on `arl/<service>/cmd/<action>`
+ *  - subscribe to the whole `arl/#` tree
+ *  - remember the retained `$topology` document of every service
+ *  - fan telemetry/state/events out to SSE and persist them in batches
+ *  - turn `arl/<svc>/events/alert` into Alert rows (raised/cleared)
+ *  - publish operator commands and correlate the `ack/<command_id>` reply
  *
  * Reconnection is implemented explicitly (exponential backoff capped at 30s)
  * instead of relying on the library's fixed reconnectPeriod, so a broker
@@ -49,17 +64,29 @@ export interface WorkerStatus {
 const MAX_PAYLOAD_BYTES = 256 * 1024;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
-const RULE_TICK_MS = 60_000;
+const STALE_TICK_MS = 60_000;
 const RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const PRUNE_INTERVAL_MS = 15 * 60 * 1000;
+
+/** A service that has published nothing for this long is considered silent. */
+const SERVICE_SILENCE_MS = 5 * 60 * 1000;
 
 /** Samples are persisted in batches rather than one transaction per message. */
 const FLUSH_INTERVAL_MS = 250;
 const MAX_PENDING_SAMPLES = 20_000;
 
+/** Commands that legitimately take longer before reaching a terminal ack. */
+const COMMAND_TIMEOUT_MS: Record<string, number> = {
+  start_generator: 45_000,
+  stop_generator: 75_000,
+  request_recalibration: 20_000,
+  cycle_airlock: 30_000,
+};
+const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
+
 interface PendingSample {
   id: string;
-  service: Service;
+  service: IngestService;
   topic: string;
   payload: string;
   timestamp: Date;
@@ -82,39 +109,76 @@ function parsePayload(buffer: Buffer): Record<string, unknown> | null {
 }
 
 /**
- * Prefer a device-supplied timestamp so replay reflects the lab clock, while
- * rejecting obviously bogus values (far future or older than the retention).
+ * The services stamp `ts` (ms since epoch). Keeping it makes replay reflect the
+ * lab clock instead of our receive time, but bogus values are rejected.
  */
 function resolveTimestamp(payload: Record<string, unknown>, now: Date): Date {
-  const candidates = [
-    payload.timestamp,
-    payload.ts,
-    payload.recordedAt,
-    payload.updatedAt,
-    payload.submittedAt,
-    payload.time,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === "number" && Number.isFinite(candidate)) {
-      const value = candidate > 1e12 ? candidate : candidate * 1000;
-      const date = new Date(value);
-      if (Math.abs(date.getTime() - now.getTime()) < RETENTION_MS) return date;
-    }
-    if (typeof candidate === "string" && candidate.trim()) {
-      const date = new Date(candidate);
-      if (!Number.isNaN(date.getTime()) && Math.abs(date.getTime() - now.getTime()) < RETENTION_MS) {
-        return date;
-      }
+  const candidate = payload.ts ?? payload.timestamp;
+  if (typeof candidate === "number" && Number.isFinite(candidate)) {
+    const value = candidate > 1e12 ? candidate : candidate * 1000;
+    const date = new Date(value);
+    if (Math.abs(date.getTime() - now.getTime()) < RETENTION_MS) return date;
+  }
+  if (typeof candidate === "string" && candidate.trim()) {
+    const date = new Date(candidate);
+    if (!Number.isNaN(date.getTime()) && Math.abs(date.getTime() - now.getTime()) < RETENTION_MS) {
+      return date;
     }
   }
   return now;
 }
 
-function serviceFromAlertType(alertType: string): Service | null {
-  if (alertType.startsWith("RTA_")) return "RTA";
-  if (alertType.startsWith("MHE_")) return "MHE";
-  if (alertType.startsWith("OPG_")) return "OPG";
-  return null;
+function num(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function str(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function toAlertEvent(payload: Record<string, unknown>): ServiceAlertEvent | null {
+  const alertId = str(payload.alert_id);
+  const type = str(payload.type);
+  const state = str(payload.state);
+  if (!alertId || !type || !state) return null;
+  return {
+    alertId,
+    type,
+    state,
+    severity: str(payload.severity) ?? "warning",
+    value: num(payload.value),
+    limit: num(payload.limit),
+    unit: str(payload.unit),
+    message: str(payload.message),
+    entity: str(payload.entity),
+    metadata:
+      payload.metadata && typeof payload.metadata === "object"
+        ? (payload.metadata as Record<string, unknown>)
+        : undefined,
+  };
+}
+
+function toScanContext(payload: Record<string, unknown>, at: Date): RtaScanContext | null {
+  if (str(payload.event) !== "started") return null;
+  const scanId = str(payload.scan_id);
+  const ra = num(payload.ra_rad);
+  const dec = num(payload.dec_rad);
+  const fov = num(payload.fov_rad);
+  if (!scanId || ra === null || dec === null || fov === null) return null;
+  return {
+    scanId,
+    target: scanTargetLabel(payload),
+    raRad: ra,
+    decRad: dec,
+    fovRad: fov,
+    bandHz: num(payload.band_hz) ?? 0,
+    gridSize: num(payload.grid_size) ?? 128,
+    overlap: num(payload.overlap) ?? 3,
+    dishes: Array.isArray(payload.dishes) ? payload.dishes.map((id) => String(id)) : [],
+    expectedDurationS: num(payload.expected_duration_s) ?? 0,
+    origin: str(payload.origin) ?? "command",
+    startedAt: at.toISOString(),
+  };
 }
 
 class MqttWorker {
@@ -127,8 +191,20 @@ class MqttWorker {
   private writeChain: Promise<void> = Promise.resolve();
   private pending: PendingSample[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
-  private rules = new AlertRuleEngine();
   private clientId: string | null = null;
+
+  /** Retained capability documents, keyed by upper-case service code. */
+  private topologies = new Map<IngestService, Topology>();
+  /** Scan contexts keyed by scan id (started events only). */
+  private scans = new Map<string, RtaScanContext>();
+  /** Last telemetry timestamp per service, for the silence rule. */
+  private lastSeen = new Map<IngestService, number>();
+  private silentSince = new Map<IngestService, number>();
+  /** Waiters for terminal acks, keyed by command id. */
+  private ackWaiters = new Map<
+    string,
+    { resolve: (ack: CommandAck | null) => void; seen: CommandAck | null }
+  >();
 
   private status: WorkerStatus = {
     state: "idle",
@@ -194,6 +270,7 @@ class MqttWorker {
       this.setStatus("connected", undefined, true);
       this.reconnectAttempts = 0;
       this.status.reconnectAttempts = 0;
+      this.silentSince.clear();
 
       client.subscribe(wildcard, { qos: 1 }, (error) => {
         if (error) {
@@ -260,12 +337,11 @@ class MqttWorker {
    *
    * The sample is emitted on `telemetryEmitter` immediately so SSE clients see
    * it without a database round trip; SQLite then receives one `createMany` per
-   * flush window instead of one transaction per sample (a scan publishes 24
-   * samples per second).
+   * flush window instead of one transaction per sample.
    */
   private ingest(topic: string, buffer: Buffer): void {
     const parsed = parseTopic(topic);
-    if (!parsed.service || parsed.kind === "command") return;
+    if (!parsed.service || parsed.kind === "command" || parsed.kind === "unknown") return;
 
     const payload = parsePayload(buffer);
     if (!payload) {
@@ -275,37 +351,103 @@ class MqttWorker {
 
     const now = new Date();
     const timestamp = resolveTimestamp(payload, now);
+    const service = parsed.service;
+
+    this.status.messagesIngested += 1;
+    this.status.lastMessageAt = now.toISOString();
+    this.silentSince.delete(service);
+    if (parsed.kind === "telemetry") this.lastSeen.set(service, now.getTime());
+
+    if (parsed.kind === "topology") {
+      this.topologies.set(service, payload as unknown as Topology);
+    }
+
+    // Acks correlate a published command with its outcome; they are not part of
+    // the replay model, so they only reach the live command channel + audit row.
+    if (parsed.kind === "ack") {
+      this.handleAck(payload);
+      this.queueSample({
+        id: globalThis.crypto.randomUUID(),
+        service,
+        topic,
+        payload: JSON.stringify(payload),
+        timestamp,
+      });
+      return;
+    }
 
     const event: TelemetryEvent = {
-      // The id is minted here (not by Prisma) so the sample can be streamed to
-      // SSE clients before the batched insert lands.
       id: globalThis.crypto.randomUUID(),
-      service: parsed.service,
+      service,
       topic,
       payload,
       timestamp: timestamp.toISOString(),
     };
-
-    this.status.messagesIngested += 1;
-    this.status.lastMessageAt = now.toISOString();
     publishTelemetry(event);
 
     this.queueSample({
       id: event.id,
-      service: parsed.service,
+      service,
       topic,
       payload: JSON.stringify(payload),
       timestamp,
     });
 
-    const flags = [
-      ...extractPayloadAlertFlags(payload, topic),
-      ...this.rules.observe(parsed, payload, timestamp),
-    ];
-    if (flags.length === 0) return;
+    if (parsed.kind === "event") {
+      this.handleEvent(service, parsed.name ?? "unknown", payload, event.timestamp);
+    }
+  }
 
-    const service = parsed.service;
-    this.enqueue("alert escalation", () => this.raiseForFlags(service, flags, timestamp));
+  private handleEvent(
+    service: IngestService,
+    kind: string,
+    payload: Record<string, unknown>,
+    timestamp: string,
+  ): void {
+    publishServiceEvent({ service, kind, payload, timestamp });
+
+    if (kind === "alert") {
+      const alertEvent = toAlertEvent(payload);
+      if (!alertEvent) return;
+      this.enqueue("alert event", async () => {
+        if (alertEvent.state === "cleared") {
+          const cleared = await clearServiceAlert(service, alertEvent);
+          if (cleared) this.status.alertsRaised += 0;
+          return;
+        }
+        const raised = await raiseServiceAlert(service, alertEvent, new Date(timestamp));
+        if (raised) this.status.alertsRaised += 1;
+      });
+      return;
+    }
+
+    if (kind === "scan" && service === "RTA") {
+      const context = toScanContext(payload, new Date(timestamp));
+      if (context) {
+        this.scans.set(context.scanId, context);
+        if (this.scans.size > 50) {
+          const oldest = this.scans.keys().next().value;
+          if (oldest) this.scans.delete(oldest);
+        }
+      }
+    }
+  }
+
+  private handleAck(payload: Record<string, unknown>): void {
+    const ack: CommandAck = {
+      ...(payload as unknown as CommandAck),
+      command_id: str(payload.command_id) ?? "",
+    };
+    if (!ack.command_id) return;
+    publishAck(ack);
+
+    const waiter = this.ackWaiters.get(ack.command_id);
+    if (!waiter) return;
+    waiter.seen = ack;
+    if (ack.state === "completed" || ack.state === "rejected" || ack.state === "failed") {
+      this.ackWaiters.delete(ack.command_id);
+      waiter.resolve(ack);
+    }
   }
 
   /** Serialise database work so SQLite never sees concurrent writers. */
@@ -314,15 +456,6 @@ class MqttWorker {
       console.error(`[mqtt] ${label} failure:`, error);
       this.status.lastError = error instanceof Error ? error.message : String(error);
     });
-  }
-
-  private async raiseForFlags(
-    service: Service,
-    flags: AlertFlag[],
-    timestamp?: Date,
-  ): Promise<void> {
-    const created = await raiseAlerts(service, flags, timestamp);
-    this.status.alertsRaised += created.length;
   }
 
   private queueSample(sample: PendingSample): void {
@@ -367,9 +500,7 @@ class MqttWorker {
 
   private startTimers(): void {
     if (!this.tickTimer) {
-      this.tickTimer = setInterval(() => {
-        this.enqueue("rule tick", () => this.runTimeBasedRules());
-      }, RULE_TICK_MS);
+      this.tickTimer = setInterval(() => this.enqueue("stale check", () => this.checkSilence()), STALE_TICK_MS);
       this.tickTimer.unref?.();
     }
 
@@ -381,12 +512,37 @@ class MqttWorker {
     }
   }
 
-  private async runTimeBasedRules(): Promise<void> {
-    const flags = this.rules.tick();
-    for (const flag of flags) {
-      const service = serviceFromAlertType(flag.type);
-      if (!service) continue;
-      await this.raiseForFlags(service, [flag]);
+  /**
+   * A service that stops publishing is the one failure the services cannot
+   * report themselves, so it is the only threshold rule evaluated locally.
+   */
+  private async checkSilence(): Promise<void> {
+    const now = Date.now();
+    for (const [service, last] of this.lastSeen) {
+      if (service === "LWM") continue;
+      if (now - last < SERVICE_SILENCE_MS) {
+        this.silentSince.delete(service);
+        continue;
+      }
+      if (this.silentSince.has(service)) continue;
+      this.silentSince.set(service, now);
+      const minutes = Math.round((now - last) / 60000);
+      const created = await raiseServiceAlert(
+        service,
+        {
+          alertId: `${service.toLowerCase()}-silent`,
+          type: "service_telemetry_lost",
+          severity: "critical",
+          state: "raised",
+          value: minutes,
+          limit: Math.round(SERVICE_SILENCE_MS / 60000),
+          unit: "min",
+          message: `No telemetry from ${service} for ${minutes} minutes`,
+          entity: "global",
+        },
+        new Date(now),
+      );
+      if (created) this.status.alertsRaised += 1;
     }
   }
 
@@ -401,25 +557,48 @@ class MqttWorker {
     }
   }
 
-  /** Publish an operator command. Throws when the broker is unavailable. */
-  async publishCommand(
-    service: Service,
-    action: string,
-    params: Record<string, unknown>,
-    issuedBy: string,
-  ): Promise<{ topic: string; envelope: CommandEnvelope }> {
+  /**
+   * Publish a control and wait for the service's ack.
+   *
+   * Commands are `{command_id, researcher, value}` on
+   * `arl/<svc>/cmd/<entity>/<control>`; the service answers on
+   * `arl/<svc>/ack/<command_id>` with accepted → completed, or rejected/failed
+   * plus a `reason`.
+   */
+  async executeControl(input: {
+    service: IngestService;
+    entity: string;
+    control: string;
+    value: unknown;
+    researcher: string;
+    timeoutMs?: number;
+  }): Promise<CommandResult> {
     const client = this.client;
     if (!client || !this.status.connected) {
       throw new Error("MQTT broker is not connected; command was not delivered.");
     }
 
-    const topic = commandTopic(env().MQTT_TOPIC_PREFIX, service, action);
-    const envelope: CommandEnvelope = {
-      action,
-      issuedBy,
-      issuedAt: new Date().toISOString(),
-      params,
-    };
+    const topic = commandTopic(
+      env().MQTT_TOPIC_PREFIX,
+      input.service,
+      input.entity,
+      input.control,
+    );
+    const commandId = `cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const envelope = { command_id: commandId, researcher: input.researcher, value: input.value };
+
+    const timeoutMs =
+      input.timeoutMs ?? COMMAND_TIMEOUT_MS[input.control] ?? DEFAULT_COMMAND_TIMEOUT_MS;
+
+    const waiter = new Promise<CommandAck | null>((resolve) => {
+      this.ackWaiters.set(commandId, { resolve, seen: null });
+      setTimeout(() => {
+        const pending = this.ackWaiters.get(commandId);
+        if (!pending) return;
+        this.ackWaiters.delete(commandId);
+        pending.resolve(pending.seen);
+      }, timeoutMs).unref?.();
+    });
 
     await new Promise<void>((resolve, reject) => {
       client.publish(topic, JSON.stringify(envelope), { qos: 1, retain: false }, (error) => {
@@ -428,7 +607,52 @@ class MqttWorker {
       });
     });
 
-    return { topic, envelope };
+    const ack = await waiter;
+    const outcome: CommandOutcome =
+      ack?.state === "completed"
+        ? "completed"
+        : ack?.state === "rejected"
+          ? "rejected"
+          : ack?.state === "failed"
+            ? "failed"
+            : "timeout";
+
+    const message =
+      outcome === "timeout"
+        ? ack
+          ? `Service accepted the command (${ack.state}); no terminal ack within ${Math.round(
+              timeoutMs / 1000,
+            )}s.`
+          : `No ack from ${input.service} within ${Math.round(timeoutMs / 1000)}s.`
+        : ack?.reason
+          ? `${outcome}: ${ack.reason}${ack.detail ? ` (${ack.detail})` : ""}`
+          : `${outcome}${ack?.detail ? `: ${ack.detail}` : ""}`;
+
+    const result: CommandResult = {
+      commandId,
+      topic,
+      control: input.control,
+      entity: input.entity,
+      value: input.value,
+      outcome,
+      ack,
+      message,
+    };
+    publishCommandResult(result);
+    return result;
+  }
+
+  /** Retained capability document for a service, once it has been received. */
+  getTopology(service: IngestService): Topology | null {
+    return this.topologies.get(service) ?? null;
+  }
+
+  /** Known scan contexts, newest last. */
+  getScanContext(scanId?: string | null): RtaScanContext | null {
+    if (scanId) return this.scans.get(scanId) ?? null;
+    let latest: RtaScanContext | null = null;
+    for (const context of this.scans.values()) latest = context;
+    return latest;
   }
 
   getStatus(): WorkerStatus {
@@ -485,6 +709,11 @@ class MqttWorker {
       await this.flushTelemetry();
     } catch (error) {
       console.error("[mqtt] shutdown flush failed:", error);
+    }
+
+    for (const [commandId, waiter] of this.ackWaiters) {
+      this.ackWaiters.delete(commandId);
+      waiter.resolve(waiter.seen);
     }
 
     const client = this.client;

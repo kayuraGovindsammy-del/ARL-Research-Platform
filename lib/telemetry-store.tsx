@@ -15,9 +15,13 @@ import {
   getJson,
   resolveAlertRequest,
 } from "./api-client";
+import { parseSurveyEvent } from "./mhe-selectors";
 import type {
   AlertRecord,
   AlertStatus,
+  CommandAck,
+  CommandResult,
+  MheCrewSurvey,
   ReplaySnapshot,
   Service,
   TelemetryEvent,
@@ -52,6 +56,16 @@ export const REPLAY_SPEEDS = [1, 2, 4, 8] as const;
 const STEP_MS = 5 * 60 * 1000;
 const MAX_ALERTS = 200;
 const STREAM_BUFFER = 900;
+const EVENT_BUFFER = 400;
+const COMMAND_BUFFER = 40;
+
+/** A non-alert service event, mirroring `lib/events.ts` on the server. */
+export interface ServiceEvent {
+  service: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+}
 
 export interface TelemetryStoreValue {
   service: Service | null;
@@ -64,6 +78,14 @@ export interface TelemetryStoreValue {
   topics: Record<string, TopicState>;
   /** Ring buffer of recent live events, for high-frequency consumers (scan heatmap). */
   stream: TelemetryEvent[];
+  /** Non-alert service events: scan lifecycle, surveys, EVA, refuel. */
+  events: ServiceEvent[];
+  /** Latest wellbeing survey per crew member, folded from `events/survey`. */
+  surveys: MheCrewSurvey[];
+  /** Acknowledgements received since this page opened, newest first. */
+  acks: CommandAck[];
+  /** Terminal outcomes of commands this page published, newest first. */
+  commands: CommandResult[];
   alerts: AlertRecord[];
   counts: Record<AlertStatus, number>;
   alertsLoading: boolean;
@@ -114,6 +136,9 @@ export function TelemetryProvider({
   });
   const [topics, setTopics] = useState<Record<string, TopicState>>({});
   const [stream, setStream] = useState<TelemetryEvent[]>([]);
+  const [events, setEvents] = useState<ServiceEvent[]>([]);
+  const [acks, setAcks] = useState<CommandAck[]>([]);
+  const [commands, setCommands] = useState<CommandResult[]>([]);
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
   const [counts, setCounts] = useState<Record<AlertStatus, number>>({
     ACTIVE: 0,
@@ -137,6 +162,7 @@ export function TelemetryProvider({
       }>(`/api/alerts?limit=${MAX_ALERTS}${serviceQuery(service, "&")}`);
       setAlerts(response.alerts);
       setCounts(response.counts);
+      setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -171,6 +197,9 @@ export function TelemetryProvider({
     let cancelled = false;
     setTopics({});
     setStream([]);
+    setEvents([]);
+    setAcks([]);
+    setCommands([]);
     setConnection("connecting");
     setError(null);
 
@@ -182,6 +211,9 @@ export function TelemetryProvider({
         if (cancelled) return;
         // Live samples arriving during hydration win over the snapshot.
         setTopics((previous) => ({ ...snapshot.topics, ...previous }));
+        // A transient failure (or a request cancelled by navigation) must not
+        // leave a permanent banner once data is flowing again.
+        setError(null);
       } catch (caught) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : String(caught));
@@ -239,6 +271,42 @@ export function TelemetryProvider({
         const payload = JSON.parse((event as MessageEvent).data) as AlertRecord;
         setAlerts((previous) => upsertAlert(previous, payload));
         scheduleAlertRefresh();
+      } catch {
+        // ignore malformed frame
+      }
+    });
+
+    source.addEventListener("event", (event) => {
+      if (cancelled) return;
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as ServiceEvent;
+        setEvents((previous) => {
+          const next =
+            previous.length >= EVENT_BUFFER
+              ? previous.slice(previous.length - EVENT_BUFFER + 1)
+              : previous;
+          return [...next, payload];
+        });
+      } catch {
+        // ignore malformed frame
+      }
+    });
+
+    source.addEventListener("ack", (event) => {
+      if (cancelled) return;
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as CommandAck;
+        setAcks((previous) => [payload, ...previous].slice(0, COMMAND_BUFFER));
+      } catch {
+        // ignore malformed frame
+      }
+    });
+
+    source.addEventListener("command", (event) => {
+      if (cancelled) return;
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as CommandResult;
+        setCommands((previous) => [payload, ...previous].slice(0, COMMAND_BUFFER));
       } catch {
         // ignore malformed frame
       }
@@ -419,6 +487,25 @@ export function TelemetryProvider({
     [loadAlerts],
   );
 
+  // Surveys are events, not retained state: one topic carries every crew
+  // member's submission, so the per-crew view is folded here from the buffer.
+  const surveys = useMemo<MheCrewSurvey[]>(() => {
+    const latest = new Map<string, MheCrewSurvey>();
+    for (const event of events) {
+      if (event.kind !== "survey") continue;
+      const survey = parseSurveyEvent(event.payload, event.timestamp);
+      if (!survey) continue;
+      const existing = latest.get(survey.crewId);
+      if (
+        !existing ||
+        Date.parse(survey.submittedAt ?? "") >= Date.parse(existing.submittedAt ?? "")
+      ) {
+        latest.set(survey.crewId, survey);
+      }
+    }
+    return Array.from(latest.values()).sort((a, b) => a.crewId.localeCompare(b.crewId));
+  }, [events]);
+
   const value = useMemo<TelemetryStoreValue>(
     () => ({
       service,
@@ -430,6 +517,10 @@ export function TelemetryProvider({
       loading,
       topics,
       stream,
+      events,
+      surveys,
+      acks,
+      commands,
       alerts,
       counts,
       alertsLoading,
@@ -458,6 +549,10 @@ export function TelemetryProvider({
       loading,
       topics,
       stream,
+      events,
+      surveys,
+      acks,
+      commands,
       alerts,
       counts,
       alertsLoading,

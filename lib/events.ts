@@ -1,5 +1,19 @@
 import { EventEmitter } from "node:events";
-import type { AlertRecord, TelemetryEvent } from "./types";
+import type {
+  AlertRecord,
+  CommandAck,
+  CommandResult,
+  IngestService,
+  TelemetryEvent,
+} from "./types";
+
+/** A non-alert service event (scan lifecycle, survey, EVA, refuel). */
+export interface ServiceEvent {
+  service: IngestService;
+  kind: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+}
 
 /**
  * Single in-process fan-out point between the MQTT ingestion worker and the
@@ -11,12 +25,21 @@ export interface TelemetryEmitter extends EventEmitter {
   emit(event: "telemetry", payload: TelemetryEvent): boolean;
   emit(event: "alert", payload: AlertRecord): boolean;
   emit(event: "worker", payload: WorkerStatusEvent): boolean;
+  emit(event: "event", payload: ServiceEvent): boolean;
+  emit(event: "ack", payload: CommandAck): boolean;
+  emit(event: "command", payload: CommandResult): boolean;
   on(event: "telemetry", listener: (payload: TelemetryEvent) => void): this;
   on(event: "alert", listener: (payload: AlertRecord) => void): this;
   on(event: "worker", listener: (payload: WorkerStatusEvent) => void): this;
+  on(event: "event", listener: (payload: ServiceEvent) => void): this;
+  on(event: "ack", listener: (payload: CommandAck) => void): this;
+  on(event: "command", listener: (payload: CommandResult) => void): this;
   off(event: "telemetry", listener: (payload: TelemetryEvent) => void): this;
   off(event: "alert", listener: (payload: AlertRecord) => void): this;
   off(event: "worker", listener: (payload: WorkerStatusEvent) => void): this;
+  off(event: "event", listener: (payload: ServiceEvent) => void): this;
+  off(event: "ack", listener: (payload: CommandAck) => void): this;
+  off(event: "command", listener: (payload: CommandResult) => void): this;
 }
 
 export interface WorkerStatusEvent {
@@ -47,4 +70,19 @@ export function publishAlert(alert: AlertRecord): void {
 
 export function publishWorkerStatus(status: WorkerStatusEvent): void {
   telemetryEmitter.emit("worker", status);
+}
+
+/** Non-alert service event (scan lifecycle, survey, EVA, refuel). */
+export function publishServiceEvent(event: ServiceEvent): void {
+  telemetryEmitter.emit("event", event);
+}
+
+/** Every ack received for a command this platform published. */
+export function publishAck(ack: CommandAck): void {
+  telemetryEmitter.emit("ack", ack);
+}
+
+/** Terminal outcome of a command (ack completed/rejected/failed, or timeout). */
+export function publishCommandResult(result: CommandResult): void {
+  telemetryEmitter.emit("command", result);
 }

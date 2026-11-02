@@ -71,6 +71,22 @@ export async function getSnapshot(
   };
 }
 
+/**
+ * The newest sample time in the database, or null when nothing has arrived.
+ *
+ * Services run under `ARL_SPEEDUP`, so their simulated clock — and therefore
+ * every `ts` they publish — can be hours ahead of wall clock. "Now" for the
+ * platform is the later of the two, never the wall clock alone.
+ */
+export async function getLatestSampleAt(service: Service | null): Promise<Date | null> {
+  const row = await prisma.telemetry.findFirst({
+    where: service ? { service } : undefined,
+    orderBy: { timestamp: "desc" },
+    select: { timestamp: true },
+  });
+  return row?.timestamp ?? null;
+}
+
 /** Earliest / latest timestamps available, used to bound the replay scrubber. */
 export async function getTelemetryBounds(
   service: Service | null,
@@ -113,4 +129,59 @@ export async function getTopicHistory(
       timestamp: row.timestamp.toISOString(),
     }))
     .reverse();
+}
+
+/**
+ * Newest sample of one exact topic, optionally narrowed by a payload substring.
+ *
+ * Events are published once, so the in-memory map that the worker keeps for
+ * live context is empty after a restart. Reading the row back lets a scan
+ * started before the process booted still be reconstructed; the substring
+ * filter is how a specific event kind (`started`, not `completed`) is picked
+ * out of a topic that carries several.
+ */
+export async function getLatestTopicSample(
+  topic: string,
+  payloadContains?: string,
+): Promise<{ payload: Record<string, unknown>; timestamp: string } | null> {
+  const row = await prisma.telemetry.findFirst({
+    where: payloadContains
+      ? { topic, payload: { contains: payloadContains } }
+      : { topic },
+    orderBy: { timestamp: "desc" },
+    select: { payload: true, timestamp: true },
+  });
+  if (!row) return null;
+  return { payload: parsePayload(row.payload), timestamp: row.timestamp.toISOString() };
+}
+
+/**
+ * Every sample of one scan stream (`arl/<svc>/<dish>/telemetry/scan`) recorded
+ * since a timestamp, for rebuilding a scan image that started before the page
+ * or the server process did.
+ *
+ * The scan id lives inside the JSON payload, which SQLite cannot index here, so
+ * the query narrows by topic suffix and time and the caller filters by id.
+ */
+export async function getStreamSamplesSince(
+  topicPrefix: string,
+  stream: string,
+  since: Date,
+  limit = 200_000,
+): Promise<Array<{ topic: string; payload: Record<string, unknown>; timestamp: string }>> {
+  const rows = await prisma.telemetry.findMany({
+    where: {
+      topic: { startsWith: topicPrefix, endsWith: `/${stream}` },
+      timestamp: { gte: since },
+    },
+    orderBy: { timestamp: "asc" },
+    take: limit,
+    select: { topic: true, payload: true, timestamp: true },
+  });
+
+  return rows.map((row) => ({
+    topic: row.topic,
+    payload: parsePayload(row.payload),
+    timestamp: row.timestamp.toISOString(),
+  }));
 }

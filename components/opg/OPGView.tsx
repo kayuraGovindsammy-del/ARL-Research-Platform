@@ -18,6 +18,7 @@ import {
   deriveOpgAlerts,
   getPower,
   getSources,
+  toCombinedTrendPoint,
   toTrendPoint,
   type TrendPoint,
 } from "@/lib/opg-selectors";
@@ -25,7 +26,7 @@ import { useTelemetry } from "@/lib/telemetry-store";
 import {
   OPG_BATTERY_CRITICAL_PCT,
   OPG_DIESEL_LOW_FUEL_PCT,
-  type PowerSource,
+  type GenerationPriority,
 } from "@/lib/types";
 import { useCommandRunner } from "@/lib/use-command";
 import { useNow } from "@/lib/use-now";
@@ -42,10 +43,10 @@ const INVERTER_TONE: Record<string, "ok" | "warn" | "alert" | "neutral"> = {
   FAULT: "alert",
 };
 
-const SOURCE_LABEL: Record<PowerSource, string> = {
-  SOLAR: "Solar array",
-  BATTERY: "Battery bank",
-  DIESEL: "Diesel generators",
+const PRIORITY_LABEL: Record<GenerationPriority, string> = {
+  solar_first: "Solar first",
+  battery_first: "Battery first",
+  diesel_first: "Diesel first",
 };
 
 export function OPGView() {
@@ -89,21 +90,23 @@ export function OPGView() {
   const powerTimestamp = power?.timestamp ?? null;
   useEffect(() => {
     if (!power) return;
-    const point = toTrendPoint(power.state as unknown as Record<string, unknown>, power.timestamp);
+    const point = toCombinedTrendPoint(power.state, power.timestamp);
     setTrend((previous) => {
       const next = [...previous.filter((entry) => entry.t !== point.t), point].sort((a, b) => a.t - b.t);
       return next.slice(-360);
     });
-  }, [power?.timestamp, power]);
+  }, [power, powerTimestamp]);
 
-  const activeSource = (state?.activeSource ?? "").toString().toUpperCase() as PowerSource | "";
+  const supplyMode = (state?.supplyMode ?? "").toString().toUpperCase();
+  const priority = (state?.generationPriority ?? "").toString();
   const inverterStatus = (state?.inverterStatus ?? "").toString().toUpperCase();
+  const generatorRunning = state?.generatorStatus === "running";
   const loadPct =
     totals.demandKw > 0 ? Math.min((totals.producedKw / totals.demandKw) * 100, 200) : null;
   const solarShare = totals.producedKw > 0 ? (totals.solarKw / totals.producedKw) * 100 : null;
 
-  const issue = (action: string, payload: Record<string, unknown>, label: string) =>
-    run({ service: "OPG", action, issuedBy: operator, ...payload }, label);
+  const issue = (control: string, entity: string, value: unknown, label: string) =>
+    run({ service: "OPG", entity, control, value, researcher: operator }, label);
 
   return (
     <div className="space-y-4">
@@ -125,8 +128,8 @@ export function OPGView() {
             <StatusDot tone={totals.deficitKw > 0 ? "alert" : "ok"} pulse={totals.deficitKw > 0} />
             {totals.deficitKw > 0 ? `${formatNumber(totals.deficitKw, 1)} kW deficit` : "demand covered"}
           </Badge>
-          <Badge tone="info">source {activeSource || "—"}</Badge>
-          {state?.loadShedding && <Badge tone="warn">load shedding</Badge>}
+          <Badge tone="info">supply {supplyMode || "—"}</Badge>
+          {state?.loadShed && <Badge tone="warn">load shedding</Badge>}
           <Badge tone="neutral">last telemetry {lastTelemetryAt ? timeAgo(lastTelemetryAt, now) : "—"}</Badge>
           {mode === "replay" && <Badge tone="warn">historical view</Badge>}
         </div>
@@ -174,8 +177,8 @@ export function OPGView() {
             value={formatNumber(totals.solarKw, 1)}
             unit="kW"
             hint={
-              state?.solarCapacityKw
-                ? `of ${formatNumber(state.solarCapacityKw, 0)} kW · ${formatNumber(solarShare, 0)}% share`
+              state?.irradianceWm2 !== null && state?.irradianceWm2 !== undefined
+                ? `${formatNumber(state.irradianceWm2, 0)} W/m² · ${formatNumber(solarShare, 0)}% share`
                 : `share ${formatNumber(solarShare, 0)}%`
             }
             tone={state?.solarEnabled === false ? "warn" : "neutral"}
@@ -193,8 +196,8 @@ export function OPGView() {
             label="Diesel output"
             value={formatNumber(totals.dieselKw, 1)}
             unit="kW"
-            hint={state?.dieselRunning ? "generator running" : "generator stopped"}
-            tone={state?.dieselRunning ? "warn" : "neutral"}
+            hint={generatorRunning ? "generator running" : "generator stopped"}
+            tone={generatorRunning ? "warn" : "neutral"}
           />
           <Metric
             label="Diesel fuel"
@@ -204,9 +207,13 @@ export function OPGView() {
           />
           <Metric
             label="Load shedding"
-            value={state?.loadShedding ? "ENGAGED" : "NORMAL"}
-            hint={state?.shedLoadKw ? `${formatNumber(state.shedLoadKw, 1)} kW shed` : "no loads shed"}
-            tone={state?.loadShedding ? "warn" : "ok"}
+            value={state?.loadShed ? "ENGAGED" : "NORMAL"}
+            hint={
+              state?.loadShed
+                ? `${formatNumber(totals.demandKw, 1)} kW total load`
+                : "no loads shed"
+            }
+            tone={state?.loadShed ? "warn" : "ok"}
           />
         </div>
 
@@ -311,7 +318,7 @@ export function OPGView() {
 
           <Panel
             title="Source status"
-            subtitle="Per-source controller heartbeats published on arl/opg/source/+/status."
+            subtitle="Per-source controller streams on arl/opg/{solar,batteries,diesel}/telemetry/power."
           >
             {sources.length === 0 ? (
               <EmptyState message="No per-source status yet." hint="Derived totals from the aggregated power topic are still shown above." />
@@ -409,19 +416,24 @@ export function OPGView() {
               </div>
 
               <div>
-                <span className="label">Default power source</span>
+                <span className="label">Generation priority</span>
                 <div className="grid grid-cols-3 gap-1">
-                  {(Object.keys(SOURCE_LABEL) as PowerSource[]).map((source) => (
+                  {(Object.keys(PRIORITY_LABEL) as GenerationPriority[]).map((option) => (
                     <button
-                      key={source}
+                      key={option}
                       type="button"
-                      className={`btn ${activeSource === source ? "btn-primary" : ""}`}
-                      disabled={pending !== null}
+                      className={`btn ${priority === option ? "btn-primary" : ""}`}
+                      disabled={pending !== null || priority === option}
                       onClick={() =>
-                        void issue("source.select", { source }, `Switch to ${SOURCE_LABEL[source]}`)
+                        void issue(
+                          "generation_priority",
+                          "global",
+                          option,
+                          `Set ${PRIORITY_LABEL[option].toLowerCase()}`,
+                        )
                       }
                     >
-                      {source}
+                      {option.split("_")[0]}
                     </button>
                   ))}
                 </div>
@@ -430,17 +442,17 @@ export function OPGView() {
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  className={`btn ${state?.loadShedding ? "btn-warn" : ""}`}
-                  disabled={pending !== null || state?.loadShedding === true}
-                  onClick={() => void issue("loadShedding.enable", {}, "Engage load shedding")}
+                  className={`btn ${state?.loadShed ? "btn-warn" : ""}`}
+                  disabled={pending !== null || state?.loadShed === true}
+                  onClick={() => void issue("load_shed", "global", true, "Engage load shedding")}
                 >
                   Shed loads
                 </button>
                 <button
                   type="button"
                   className="btn"
-                  disabled={pending !== null || state?.loadShedding !== true}
-                  onClick={() => void issue("loadShedding.disable", {}, "Release load shedding")}
+                  disabled={pending !== null || state?.loadShed !== true}
+                  onClick={() => void issue("load_shed", "global", false, "Release load shedding")}
                 >
                   Release loads
                 </button>
@@ -448,7 +460,7 @@ export function OPGView() {
                   type="button"
                   className="btn"
                   disabled={pending !== null || state?.solarEnabled === true}
-                  onClick={() => void issue("solar.enable", {}, "Enable solar array")}
+                  onClick={() => void issue("enable_solar_array", "solar", true, "Enable solar array")}
                 >
                   Enable solar
                 </button>
@@ -456,23 +468,23 @@ export function OPGView() {
                   type="button"
                   className="btn btn-warn"
                   disabled={pending !== null || state?.solarEnabled === false}
-                  onClick={() => void issue("solar.disable", {}, "Disable solar array")}
+                  onClick={() => void issue("enable_solar_array", "solar", false, "Disable solar array")}
                 >
                   Disable solar
                 </button>
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={pending !== null || state?.dieselRunning === true}
-                  onClick={() => void issue("diesel.start", {}, "Start diesel generator")}
+                  disabled={pending !== null || generatorRunning}
+                  onClick={() => void issue("start_generator", "diesel", true, "Start diesel generator")}
                 >
                   Start diesel
                 </button>
                 <button
                   type="button"
                   className="btn btn-danger"
-                  disabled={pending !== null || state?.dieselRunning !== true}
-                  onClick={() => void issue("diesel.stop", {}, "Stop diesel generator")}
+                  disabled={pending !== null || !generatorRunning}
+                  onClick={() => void issue("stop_generator", "diesel", true, "Stop diesel generator")}
                 >
                   Stop diesel
                 </button>
@@ -492,7 +504,7 @@ export function OPGView() {
 
               <p className="text-[10px] text-console-muted">
                 Solar {state?.solarEnabled === false ? "disabled" : "enabled"} · diesel{" "}
-                {state?.dieselRunning ? "running" : "stopped"} · inverter {inverterStatus || "unknown"}
+                {generatorRunning ? "running" : "stopped"} · inverter {inverterStatus || "unknown"}
               </p>
             </div>
           </Panel>

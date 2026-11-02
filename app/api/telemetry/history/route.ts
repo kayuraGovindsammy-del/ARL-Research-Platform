@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTopicHistory } from "@/lib/snapshot";
+import { getLatestSampleAt, getTopicHistory } from "@/lib/snapshot";
 
 /**
- * GET /api/telemetry/history?topic=arl/opg/power&minutes=30&limit=240
+ * GET /api/telemetry/history?topic=arl/opg/global/telemetry/power&minutes=30&limit=240
  *
  * Chronological samples for a single topic, used to seed the OPG trend chart.
  */
@@ -19,9 +19,13 @@ export async function GET(request: NextRequest) {
 
   const minutes = Math.min(Math.max(Number(params.get("minutes") ?? 30), 1), 24 * 60);
   const limit = Math.min(Math.max(Number(params.get("limit") ?? 240), 1), 2000);
-  const since = new Date(Date.now() - minutes * 60 * 1000);
 
   try {
+    // The window is measured back from the platform clock, not the wall clock:
+    // accelerated services publish on a simulated timeline ahead of real time.
+    const latest = await getLatestSampleAt(null);
+    const anchor = latest && latest.getTime() > Date.now() ? latest : new Date();
+    const since = new Date(anchor.getTime() - minutes * 60 * 1000);
     const samples = await getTopicHistory(topic, since, limit);
     return NextResponse.json(
       { topic, since: since.toISOString(), samples },

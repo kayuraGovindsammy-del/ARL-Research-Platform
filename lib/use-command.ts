@@ -1,14 +1,32 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { sendCommand, type CommandRequest } from "./api-client";
+import { ApiError, sendControl, type CommandRequest } from "./api-client";
+import type { CommandOutcome } from "./types";
 
 export interface CommandFeedback {
   tone: "ok" | "warn" | "alert";
   text: string;
+  outcome?: CommandOutcome;
 }
 
-/** Shared command dispatch state: pending action + transient operator feedback. */
+const OUTCOME_TONE: Record<CommandOutcome, CommandFeedback["tone"]> = {
+  completed: "ok",
+  rejected: "warn",
+  failed: "alert",
+  timeout: "warn",
+};
+
+/**
+ * Shared control dispatch state: the in-flight control + transient operator
+ * feedback.
+ *
+ * The service answers every command with an ack, and that verdict is what the
+ * operator needs to read: `completed` is success, `rejected` means the guard in
+ * the service refused it (with a reason), `timeout` means it was accepted but
+ * the terminal ack never arrived. Transport failures (broker down, validation)
+ * throw from the API route instead.
+ */
 export function useCommandRunner() {
   const [pending, setPending] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<CommandFeedback | null>(null);
@@ -21,21 +39,24 @@ export function useCommandRunner() {
 
   const run = useCallback(
     async (request: CommandRequest, label?: string) => {
-      setPending(request.action);
+      const name = label ?? request.control;
+      setPending(request.control);
       try {
-        const result = await sendCommand(request);
+        const { result } = await sendControl(request);
         setFeedback({
-          tone: "ok",
-          text: `${label ?? request.action} accepted → ${result.topic}`,
+          tone: OUTCOME_TONE[result.outcome],
+          text: `${name} → ${result.message}`,
+          outcome: result.outcome,
         });
-        return true;
+        return result.outcome === "completed";
       } catch (caught) {
-        setFeedback({
-          tone: "alert",
-          text: `${label ?? request.action} failed: ${
-            caught instanceof Error ? caught.message : String(caught)
-          }`,
-        });
+        const message =
+          caught instanceof ApiError
+            ? caught.message
+            : caught instanceof Error
+              ? caught.message
+              : String(caught);
+        setFeedback({ tone: "alert", text: `${name} failed: ${message}` });
         return false;
       } finally {
         setPending(null);

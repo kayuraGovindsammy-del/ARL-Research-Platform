@@ -1,12 +1,6 @@
 import { prisma, withDbRetry } from "./prisma";
 import { publishAlert } from "./events";
-import {
-  ALERT_STATUSES,
-  type AlertRecord,
-  type AlertStatus,
-  type AlertFlag,
-  type Service,
-} from "./types";
+import { ALERT_STATUSES, type AlertRecord, type AlertStatus } from "./types";
 
 /**
  * Alert lifecycle + operator audit trail.
@@ -65,38 +59,73 @@ export function normalizeStatus(value: string): AlertStatus {
     : "ACTIVE";
 }
 
-/** In-flight guard so concurrent samples cannot create duplicate rows. */
-const inFlight = new Set<string>();
+// ---------------------------------------------------------------------------
+// Service-originated alerts (`arl/<svc>/events/alert`)
+// ---------------------------------------------------------------------------
 
-export interface RaiseAlertInput {
-  service: Service | string;
-  flag: AlertFlag;
-  timestamp?: Date;
+export interface ServiceAlertEvent {
+  alertId: string;
+  type: string;
+  severity: string;
+  state: "raised" | "cleared" | string;
+  value?: number | null;
+  limit?: number | null;
+  unit?: string | null;
+  message?: string | null;
+  entity?: string | null;
+  metadata?: Record<string, unknown>;
 }
 
 /**
- * Create an alert unless an ACTIVE alert with the same (service, alertType)
- * already exists. Returns the created record, or null when suppressed.
+ * Dedupe key for a service alert. The service reports escalations under the
+ * same `alert_id`, and entity-scoped alerts (one dish overheating) reuse the
+ * same `type`, so the id is what keeps them distinct.
  */
-export async function raiseAlert({
-  service,
-  flag,
-  timestamp,
-}: RaiseAlertInput): Promise<AlertRecord | null> {
-  const alertType = flag.type.trim();
-  const message = flag.message.trim();
-  if (!alertType || !message) return null;
+export function serviceAlertType(event: ServiceAlertEvent): string {
+  return `${event.type}:${event.alertId}`;
+}
 
-  const dedupeKey = `${service}|${alertType}`;
-  if (inFlight.has(dedupeKey)) return null;
-  inFlight.add(dedupeKey);
+function formatAlertMessage(event: ServiceAlertEvent): string {
+  const parts: string[] = [];
+  if (event.message) parts.push(event.message);
+  if (event.entity && event.entity !== "global") parts.push(event.entity);
+  if (typeof event.value === "number") {
+    const unit = event.unit ? ` ${event.unit}` : "";
+    const limit = typeof event.limit === "number" ? ` (limit ${event.limit}${unit})` : "";
+    parts.push(`${event.value}${unit}${limit}`);
+  }
+  if (event.severity) parts.push(`[${event.severity}]`);
+  return parts.join(" · ") || `${event.type} alert`;
+}
+
+/**
+ * Persist a raised service alert. Escalations reuse the same `alert_id`, so an
+ * ACTIVE row has its message refreshed instead of being duplicated.
+ */
+export async function raiseServiceAlert(
+  service: string,
+  event: ServiceAlertEvent,
+  timestamp?: Date,
+): Promise<AlertRecord | null> {
+  const alertType = serviceAlertType(event);
+  const message = formatAlertMessage(event);
 
   try {
     const existing = await prisma.alert.findFirst({
       where: { service, alertType, status: "ACTIVE" },
-      select: { id: true },
+      select: { id: true, message: true },
     });
-    if (existing) return null;
+    if (existing) {
+      if (existing.message === message) return null;
+      const refreshed = await withDbRetry(
+        (): Promise<RawAlert> =>
+          prisma.alert.update({ where: { id: existing.id }, data: { message } }),
+        "alert escalate",
+      );
+      const record = toAlertRecord(refreshed);
+      publishAlert(record);
+      return record;
+    }
 
     const created = await withDbRetry(
       (): Promise<RawAlert> =>
@@ -111,26 +140,48 @@ export async function raiseAlert({
         }),
       "alert create",
     );
-
     const record = toAlertRecord(created);
     publishAlert(record);
     return record;
-  } finally {
-    inFlight.delete(dedupeKey);
+  } catch (error) {
+    console.error("[alert] failed to record service alert:", error);
+    return null;
   }
 }
 
-export async function raiseAlerts(
-  service: Service | string,
-  flags: AlertFlag[],
-  timestamp?: Date,
-): Promise<AlertRecord[]> {
-  const created: AlertRecord[] = [];
-  for (const flag of flags) {
-    const record = await raiseAlert({ service, flag, timestamp });
-    if (record) created.push(record);
+/** Resolve the ACTIVE row for a cleared service alert. */
+export async function clearServiceAlert(
+  service: string,
+  event: ServiceAlertEvent,
+): Promise<AlertRecord | null> {
+  const alertType = serviceAlertType(event);
+  try {
+    const existing = await prisma.alert.findFirst({
+      where: { service, alertType, status: "ACTIVE" },
+      select: { id: true },
+    });
+    if (!existing) return null;
+
+    const updated = await withDbRetry(
+      (): Promise<RawAlert> =>
+        prisma.alert.update({
+          where: { id: existing.id },
+          data: {
+            status: "RESOLVED",
+            resolvedBy: `${service} service`,
+            resolvedAt: new Date(),
+            resolutionNote: `Cleared automatically: ${event.message ?? event.type} is no longer active.`,
+          },
+        }),
+      "alert auto-resolve",
+    );
+    const record = toAlertRecord(updated);
+    publishAlert(record);
+    return record;
+  } catch (error) {
+    console.error("[alert] failed to clear service alert:", error);
+    return null;
   }
-  return created;
 }
 
 export interface ListAlertsOptions {

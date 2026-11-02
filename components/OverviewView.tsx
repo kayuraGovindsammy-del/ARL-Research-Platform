@@ -14,10 +14,12 @@ import {
   OPG_BATTERY_CRITICAL_PCT,
   OPG_DIESEL_LOW_FUEL_PCT,
   RTA_MIN_OPERATIONAL_DISHES,
+  RTA_WIND_RELEASE_MS,
   RTA_WIND_STOW_LIMIT_MS,
 } from "@/lib/types";
 import { useNow } from "@/lib/use-now";
 import { AlertAnnunciator } from "./AlertAnnunciator";
+import { LabMap } from "./LabMap";
 import { ReplayBar } from "./ReplayBar";
 import { Badge, Metric, Panel, ProgressBar, StatusDot } from "./ui";
 
@@ -166,11 +168,14 @@ export function OverviewView() {
               tone={rta.summary.hotDishes > 0 ? "alert" : "neutral"}
             />
             <Metric
-              label="Wind"
-              value={formatNumber(rta.array?.windSpeedMs, 1)}
-              unit="m/s"
-              hint={`stow at ${RTA_WIND_STOW_LIMIT_MS} m/s`}
-              tone={(rta.array?.windSpeedMs ?? 0) >= RTA_WIND_STOW_LIMIT_MS ? "alert" : "neutral"}
+              label="Wind stow"
+              value={rta.array?.windStow ? "ENGAGED" : "CLEAR"}
+              hint={
+                rta.array?.windStow
+                  ? `releases below ${RTA_WIND_RELEASE_MS} m/s`
+                  : `stows at ${RTA_WIND_STOW_LIMIT_MS} m/s gust`
+              }
+              tone={rta.array?.windStow ? "alert" : "ok"}
             />
           </div>
           <div className="mt-3 flex items-center gap-2">
@@ -283,6 +288,14 @@ export function OverviewView() {
           </div>
         </Panel>
       </div>
+
+      <Panel
+        title="ARL campus"
+        subtitle="Facility footprints and the 100-dish phase-1 array, projected from the supplied arl.geojson."
+        actions={<Badge tone="neutral">campus site plan</Badge>}
+      >
+        <LabMap />
+      </Panel>
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Panel

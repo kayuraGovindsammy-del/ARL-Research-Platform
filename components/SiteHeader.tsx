@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { ResearcherBadge } from "./ResearcherBadge";
 import { Badge, StatusDot, type Tone } from "./ui";
 
 const LINKS = [
@@ -115,6 +116,7 @@ export function SiteHeader() {
         </nav>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
+          <ResearcherBadge />
           <Badge tone={healthTone(envOk, !checked)}>
             <StatusDot tone={healthTone(envOk, !checked)} />
             env

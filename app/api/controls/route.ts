@@ -1,16 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { writeAuditLog } from "@/lib/alerts";
+import { CONTROL_ENTITY_HINT, getControl, validateControlValue } from "@/lib/controls";
 import { getMqttWorker } from "@/lib/mqtt-worker";
 import type { Service } from "@/lib/types";
 
 /**
  * POST /api/controls
  *
- * Operator commands are validated here, published to
- * `arl/<service>/cmd/<action>` on the broker and written to the audit trail.
+ * Publishes one operator control and waits for the service's ack:
  *
- * body: { service, action, issuedBy, ...actionParams }
+ *   body: { service, entity, control, value, researcher }
+ *   wire: arl/<service>/cmd/<entity>/<control>  ←  {command_id, researcher, value}
+ *   ack:  arl/<service>/ack/<command_id>        →  accepted → completed | rejected
+ *
+ * Values are validated against the catalogue in `lib/controls.ts` first, so an
+ * out-of-range input fails here instead of asynchronously on the broker. The
+ * response is always 200 once the command was delivered; `result.outcome`
+ * carries the service's verdict (completed/rejected/failed/timeout).
  */
 
 export const runtime = "nodejs";
@@ -27,127 +34,12 @@ class ControlError extends Error {
 
 const bodySchema = z.object({
   service: z.enum(["RTA", "MHE", "OPG"]),
-  action: z.string().trim().min(1).max(64),
-  issuedBy: z.string().trim().min(2).max(120).optional(),
-  targetId: z.string().trim().min(1).max(120).optional(),
-  custom: z.boolean().optional(),
-  ra: z.number().finite().optional(),
-  dec: z.number().finite().optional(),
-  dishId: z.string().trim().min(1).max(64).optional(),
-  subArray: z.string().trim().min(1).max(64).optional(),
-  roomId: z.string().trim().min(1).max(64).optional(),
-  temperatureC: z.number().finite().min(-20).max(45).optional(),
-  lightLevelPct: z.number().finite().min(0).max(100).optional(),
-  crewId: z.string().trim().min(1).max(64).optional(),
-  source: z.enum(["SOLAR", "BATTERY", "DIESEL"]).optional(),
+  /** Dish id, room id, crew id, sub-array name, or the fixed entity of a global control. */
+  entity: z.string().trim().min(1).max(64).optional(),
+  control: z.string().trim().min(1).max(64),
+  value: z.unknown(),
+  researcher: z.string().trim().min(2).max(120).optional(),
 });
-
-type ActionKey =
-  | "scan.start"
-  | "scan.pause"
-  | "scan.resume"
-  | "scan.cancel"
-  | "dish.disable"
-  | "dish.enable"
-  | "dish.stow"
-  | "array.stow"
-  | "array.subArray"
-  | "room.temperature"
-  | "room.light"
-  | "crew.wellnessCheck"
-  | "airlock.pressurize"
-  | "source.select"
-  | "loadShedding.enable"
-  | "loadShedding.disable"
-  | "solar.enable"
-  | "solar.disable"
-  | "diesel.start"
-  | "diesel.stop";
-
-const ALLOWED_ACTIONS: Record<Service, ActionKey[]> = {
-  RTA: [
-    "scan.start",
-    "scan.pause",
-    "scan.resume",
-    "scan.cancel",
-    "dish.disable",
-    "dish.enable",
-    "dish.stow",
-    "array.stow",
-    "array.subArray",
-  ],
-  MHE: ["room.temperature", "room.light", "crew.wellnessCheck", "airlock.pressurize"],
-  OPG: [
-    "source.select",
-    "loadShedding.enable",
-    "loadShedding.disable",
-    "solar.enable",
-    "solar.disable",
-    "diesel.start",
-    "diesel.stop",
-  ],
-};
-
-function requireField<T>(value: T | undefined, field: string, action: string): T {
-  if (value === undefined || value === null || value === "") {
-    throw new ControlError(`Field '${field}' is required for action '${action}'.`);
-  }
-  return value;
-}
-
-function buildParams(
-  service: Service,
-  action: ActionKey,
-  input: z.infer<typeof bodySchema>,
-): Record<string, unknown> {
-  switch (action) {
-    case "scan.start":
-      return {
-        targetId: requireField(input.targetId, "targetId", action),
-        custom: Boolean(input.custom),
-        ra: input.ra ?? null,
-        dec: input.dec ?? null,
-      };
-    case "dish.disable":
-    case "dish.enable":
-    case "dish.stow":
-      return { dishId: requireField(input.dishId, "dishId", action) };
-    case "array.subArray":
-      return {
-        dishId: requireField(input.dishId, "dishId", action),
-        subArray: requireField(input.subArray, "subArray", action),
-      };
-    case "room.temperature":
-      return {
-        roomId: requireField(input.roomId, "roomId", action),
-        temperatureC: requireField(input.temperatureC, "temperatureC", action),
-      };
-    case "room.light":
-      return {
-        roomId: requireField(input.roomId, "roomId", action),
-        lightLevelPct: requireField(input.lightLevelPct, "lightLevelPct", action),
-      };
-    case "crew.wellnessCheck":
-      return { crewId: requireField(input.crewId, "crewId", action) };
-    case "airlock.pressurize":
-      return { roomId: input.roomId ?? "airlock" };
-    case "source.select":
-      return { source: requireField(input.source, "source", action) };
-    case "scan.pause":
-    case "scan.resume":
-    case "scan.cancel":
-    case "array.stow":
-    case "loadShedding.enable":
-    case "loadShedding.disable":
-    case "solar.enable":
-    case "solar.disable":
-    case "diesel.start":
-    case "diesel.stop":
-      return {};
-    default:
-      throw new ControlError(`Unsupported action '${action}'.`);
-  }
-}
 
 export async function POST(request: NextRequest) {
   let raw: unknown;
@@ -170,29 +62,45 @@ export async function POST(request: NextRequest) {
 
   const input = parsed.data;
   const service = input.service as Service;
-  const action = input.action as ActionKey;
-
-  if (!ALLOWED_ACTIONS[service].includes(action)) {
-    return NextResponse.json(
-      { error: `Action '${action}' is not valid for ${service}.` },
-      { status: 422 },
-    );
-  }
-
-  const issuedBy = input.issuedBy ?? "Console Operator";
 
   try {
-    const params = buildParams(service, action, input);
+    const spec = getControl(service, input.control);
+    if (!spec) {
+      throw new ControlError(`'${input.control}' is not a ${service} control.`);
+    }
+
+    // Global controls address one named entity (e.g. OPG `global`, `solar`);
+    // per-entity controls must name their target.
+    const entity = spec.entity ?? input.entity;
+    if (!entity) {
+      throw new ControlError(`${spec.label} needs an entity (${CONTROL_ENTITY_HINT[spec.entityKind]}).`);
+    }
+
+    const invalid = validateControlValue(spec, input.value, entity);
+    if (invalid) throw new ControlError(invalid);
+
+    const researcher = input.researcher?.trim() || "Console Operator";
     const worker = getMqttWorker();
-    const { topic, envelope } = await worker.publishCommand(service, action, params, issuedBy);
+    const result = await worker.executeControl({
+      service,
+      entity,
+      control: input.control,
+      value: input.value,
+      researcher,
+    });
 
     await writeAuditLog(
-      `CONTROL_${action.replace(/[.\s]+/g, "_").toUpperCase()}`,
-      issuedBy,
-      `Published ${service} command to ${topic}: ${JSON.stringify(params)}`,
+      `CONTROL_${input.control.toUpperCase()}`,
+      researcher,
+      `${service} ${input.control} → ${entity} = ${JSON.stringify(input.value)} · ${result.outcome}${
+        result.ack?.reason ? ` (${result.ack.reason})` : ""
+      }`,
     );
 
-    return NextResponse.json({ ok: true, topic, envelope }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(
+      { ok: result.outcome === "completed", result },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (error) {
     if (error instanceof ControlError) {
       return NextResponse.json({ error: error.message }, { status: error.status });

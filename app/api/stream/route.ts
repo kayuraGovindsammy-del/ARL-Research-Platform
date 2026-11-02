@@ -1,8 +1,14 @@
 import { NextRequest } from "next/server";
 import { telemetryEmitter } from "@/lib/events";
-import type { WorkerStatusEvent } from "@/lib/events";
+import type { ServiceEvent, WorkerStatusEvent } from "@/lib/events";
 import { ensureMqttWorker } from "@/lib/mqtt-worker";
-import { toService, type AlertRecord, type TelemetryEvent } from "@/lib/types";
+import {
+  toService,
+  type AlertRecord,
+  type CommandAck,
+  type CommandResult,
+  type TelemetryEvent,
+} from "@/lib/types";
 
 /**
  * Live SSE endpoint. Values are pushed straight from the in-process
@@ -10,8 +16,11 @@ import { toService, type AlertRecord, type TelemetryEvent } from "@/lib/types";
  *
  * Events:
  *   ready      initial handshake (broker state, subscription, server time)
- *   telemetry  one persisted Telemetry row
- *   alert      alert raised or transitioned
+ *   telemetry  one persisted Telemetry row (telemetry or state topic)
+ *   alert      alert raised, escalated, acknowledged or cleared
+ *   event      non-alert service event (scan lifecycle, survey, EVA, refuel)
+ *   ack        every command acknowledgement, including accepted/in_progress
+ *   command    terminal outcome of a command this platform published
  *   worker     broker connectivity state change
  *
  * `?service=RTA|MHE|OPG` narrows the firehose to one instrument.
@@ -59,9 +68,24 @@ export async function GET(request: NextRequest) {
 
       const onWorker = (status: WorkerStatusEvent) => send("worker", status);
 
+      const onEvent = (event: ServiceEvent) => {
+        if (service && event.service !== service) return;
+        send("event", event);
+      };
+
+      const onAck = (ack: CommandAck) => send("ack", ack);
+
+      const onCommand = (result: CommandResult) => {
+        if (service && !result.topic.includes(`/${service.toLowerCase()}/`)) return;
+        send("command", result);
+      };
+
       telemetryEmitter.on("telemetry", onTelemetry);
       telemetryEmitter.on("alert", onAlert);
       telemetryEmitter.on("worker", onWorker);
+      telemetryEmitter.on("event", onEvent);
+      telemetryEmitter.on("ack", onAck);
+      telemetryEmitter.on("command", onCommand);
 
       const heartbeat = setInterval(() => {
         write(`: keepalive ${Date.now()}\n\n`);
@@ -75,6 +99,9 @@ export async function GET(request: NextRequest) {
         telemetryEmitter.off("telemetry", onTelemetry);
         telemetryEmitter.off("alert", onAlert);
         telemetryEmitter.off("worker", onWorker);
+        telemetryEmitter.off("event", onEvent);
+        telemetryEmitter.off("ack", onAck);
+        telemetryEmitter.off("command", onCommand);
         try {
           controller.close();
         } catch {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSnapshot } from "@/lib/snapshot";
+import { getLatestSampleAt, getSnapshot } from "@/lib/snapshot";
 import { ensureMqttWorker } from "@/lib/mqtt-worker";
 import { toService } from "@/lib/types";
 
@@ -8,6 +8,10 @@ import { toService } from "@/lib/types";
  *
  * Latest value of every topic for the requested instrument. Used to hydrate a
  * dashboard immediately on mount; subsequent updates arrive over SSE.
+ *
+ * The bound is the platform clock, not the wall clock: a service running under
+ * `ARL_SPEEDUP` stamps its samples on a simulated timeline that runs ahead of
+ * real time, and a wall-clock cut-off would hide every one of them.
  */
 
 export const runtime = "nodejs";
@@ -18,7 +22,9 @@ export async function GET(request: NextRequest) {
 
   try {
     ensureMqttWorker();
-    const snapshot = await getSnapshot(new Date(), service);
+    const latest = await getLatestSampleAt(service);
+    const target = latest && latest.getTime() > Date.now() ? latest : new Date();
+    const snapshot = await getSnapshot(target, service);
     return NextResponse.json(snapshot, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("[telemetry] latest snapshot failed:", error);

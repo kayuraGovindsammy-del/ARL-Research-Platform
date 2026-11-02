@@ -1,16 +1,28 @@
+import { parseTopic } from "./topics";
 import {
   RTA_DISH_COUNT,
-  RTA_DISH_TEMP_LIMIT_C,
+  RTA_DISH_TEMP_WARN_C,
   RTA_MIN_OPERATIONAL_DISHES,
-  RTA_WIND_STOW_LIMIT_MS,
+  kelvinToCelsius,
+  radiansToDegrees,
   type DishCondition,
   type RtaArrayStatus,
   type RtaDishMetrics,
+  type RtaScanContext,
   type RtaScanSample,
+  type ScanState,
   type TopicState,
 } from "./types";
 
-/** Pure derivations from the topic map, shared by the RTA panels. */
+/**
+ * Pure derivations from the topic map, shared by the RTA panels.
+ *
+ * The simulator publishes one `telemetry/normal` sample per dish every 120 s
+ * (`telemetry/scan` at 1 Hz while scanning) and keeps `state/<item>` retained,
+ * so a dish's view model merges both sources: the stream for measurements and
+ * the retained state for identity (enabled, stowed, sub-array, commanded
+ * pointing).
+ */
 
 export interface DishEntry {
   id: string;
@@ -43,53 +55,225 @@ export interface DishSummary {
   lastMetricsAt: string | null;
 }
 
-export function getArrayStatus(topics: Record<string, TopicState>): ArrayStatusState | null {
-  const entry = Object.values(topics).find((state) => state.topic.endsWith("/rta/array/status"));
-  if (!entry) return null;
-  return { status: entry.payload as RtaArrayStatus, timestamp: entry.timestamp };
-}
+const SCAN_STATES: ScanState[] = [
+  "IDLE",
+  "SCHEDULED",
+  "SCANNING",
+  "PAUSED",
+  "CANCELLED",
+  "COMPLETE",
+];
 
-function dishIdFromTopic(topic: string): string | null {
-  const segments = topic.split("/");
-  const index = segments.indexOf("dish");
-  if (index === -1 || index + 1 >= segments.length) return null;
-  return segments[index + 1] || null;
-}
+/** The service reports `running`; the UI calls that state `SCANNING`. */
+const SCAN_STATE_ALIASES: Record<string, ScanState> = {
+  idle: "IDLE",
+  scheduled: "SCHEDULED",
+  running: "SCANNING",
+  scanning: "SCANNING",
+  paused: "PAUSED",
+  cancelled: "CANCELLED",
+  complete: "COMPLETE",
+};
 
-function asNumber(value: unknown): number | null {
+function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function normalizeCondition(value: unknown): DishCondition | "UNKNOWN" {
-  if (typeof value !== "string") return "UNKNOWN";
-  const upper = value.toUpperCase();
-  if (
-    upper === "OPERATIONAL" ||
-    upper === "DEGRADED" ||
-    upper === "OFFLINE" ||
-    upper === "DISABLED" ||
-    upper === "STOWED"
-  ) {
-    return upper;
-  }
-  return "UNKNOWN";
+function bool(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
-export function getDishes(topics: Record<string, TopicState>): DishEntry[] {
-  const entries: DishEntry[] = [];
+function str(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
+function normalizeScanState(value: unknown): ScanState {
+  if (typeof value !== "string") return "IDLE";
+  const normalized = SCAN_STATE_ALIASES[value.trim().toLowerCase()];
+  if (normalized) return normalized;
+  const upper = value.toUpperCase();
+  return (SCAN_STATES as string[]).includes(upper) ? (upper as ScanState) : "IDLE";
+}
+
+/** Epoch milliseconds from a retained timestamp item, as ISO. */
+function toIso(value: unknown): string | null {
+  const ms = num(value);
+  if (ms === null || ms <= 0) return null;
+  const date = new Date(ms);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/**
+ * The array as a whole. `main` is the scanning sub-array researchers command;
+ * `auto-2` and friends appear and disappear, so the member lists are read from
+ * retained state rather than assumed.
+ */
+export function getArrayStatus(topics: Record<string, TopicState>): ArrayStatusState | null {
+  const scanItem = findState(topics, "rta", "main", "scan_state");
+  const online = findState(topics, "rta", "global", "online");
+  if (!scanItem && !online) return null;
+
+  const subArrays: Record<string, { dishIds: string[] }> = {};
   for (const state of Object.values(topics)) {
-    if (!/\/rta\/dish\/[^/]+\/metrics$/.test(state.topic)) continue;
-    const id = dishIdFromTopic(state.topic);
-    if (!id) continue;
-    const payload = state.payload as unknown as RtaDishMetrics;
+    const parsed = parseTopic(state.topic);
+    if (parsed.service !== "RTA" || parsed.kind !== "state" || parsed.name !== "members") continue;
+    const members = Array.isArray(state.payload.value)
+      ? (state.payload.value as unknown[]).map((id) => String(id))
+      : [];
+    subArrays[parsed.entity ?? "main"] = { dishIds: members };
+  }
+
+  const activeAlerts = findState(topics, "rta", "global", "active_alerts");
+  const target = parseTargetState(findState(topics, "rta", "main", "target")?.payload.value);
+
+  const status: RtaArrayStatus = {
+    status: normalizeScanState(scanItem?.payload.value),
+    scanId: str(findState(topics, "rta", "main", "scan_id")?.payload.value),
+    target: target.id,
+    targetId: target.id,
+    targetName: target.name,
+    targetRaDeg: target.raDeg,
+    targetDecDeg: target.decDeg,
+    observationFrequencyHz: num(
+      findState(topics, "rta", "main", "observation_frequency")?.payload.value,
+    ),
+    nextScanAt: toIso(findState(topics, "rta", "main", "next_scan")?.payload.value),
+    windStow: bool(findState(topics, "rta", "global", "wind_stow")?.payload.value),
+    activeDishes:
+      num(findState(topics, "rta", "global", "active_dishes")?.payload.value) ?? undefined,
+    operationalDishes:
+      num(findState(topics, "rta", "global", "active_dishes")?.payload.value) ?? undefined,
+    online: bool(online?.payload.value),
+    activeAlerts: Array.isArray(activeAlerts?.payload.value)
+      ? (activeAlerts!.payload.value as unknown[]).map(String)
+      : [],
+    subArrays,
+    updatedAt: scanItem?.timestamp ?? online?.timestamp,
+  };
+
+  return { status, timestamp: status.updatedAt ?? new Date().toISOString() };
+}
+
+/**
+ * The retained `target` item is either a catalogue id or — for a custom sky
+ * position set by the operator — the object `{ra_rad, dec_rad, fov_rad}`.
+ */
+function parseTargetState(value: unknown): {
+  id: string | null;
+  name: string | null;
+  raDeg: number | null;
+  decDeg: number | null;
+} {
+  if (typeof value === "string") {
+    const id = str(value);
+    return { id, name: id, raDeg: null, decDeg: null };
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const raDeg = radiansToDegrees(num(record.ra_rad));
+    const decDeg = radiansToDegrees(num(record.dec_rad));
+    return {
+      id: "custom",
+      name:
+        raDeg !== null && decDeg !== null
+          ? `RA ${raDeg.toFixed(2)}° · Dec ${decDeg.toFixed(2)}°`
+          : "custom position",
+      raDeg,
+      decDeg,
+    };
+  }
+  return { id: null, name: null, raDeg: null, decDeg: null };
+}
+
+function findState(
+  topics: Record<string, TopicState>,
+  service: string,
+  entity: string,
+  item: string,
+): TopicState | null {
+  for (const state of Object.values(topics)) {
+    const parsed = parseTopic(state.topic);
+    if (
+      parsed.service === service.toUpperCase() &&
+      parsed.kind === "state" &&
+      parsed.entity === entity &&
+      parsed.name === item
+    ) {
+      return state;
+    }
+  }
+  return null;
+}
+
+function conditionFor(
+  payload: Record<string, unknown>,
+  enabled: boolean | undefined,
+  stowed: boolean | undefined,
+): DishCondition {
+  if (enabled === false) return "DISABLED";
+  if (stowed === true) return "STOWED";
+  const fault = str(payload.fault_code);
+  const status = bool(payload.status);
+  if (status === false) return "OFFLINE";
+  if (fault && fault !== "none") return "DEGRADED";
+  return "OPERATIONAL";
+}
+
+/** Per-dish view model merged from `telemetry/normal|scan` and `state/*`. */
+export function getDishes(topics: Record<string, TopicState>): DishEntry[] {
+  const states = new Map<string, TopicState>();
+  for (const state of Object.values(topics)) {
+    const parsed = parseTopic(state.topic);
+    if (parsed.service !== "RTA" || parsed.kind !== "state" || !parsed.entity) continue;
+    states.set(`${parsed.entity}/${parsed.name}`, state);
+  }
+
+  const entries: DishEntry[] = [];
+  for (const state of Object.values(topics)) {
+    const parsed = parseTopic(state.topic);
+    if (parsed.service !== "RTA" || parsed.kind !== "telemetry" || !parsed.entity) continue;
+    if (parsed.name !== "normal" && parsed.name !== "scan") continue;
+    if (!parsed.entity.startsWith("dish-")) continue;
+
+    const payload = state.payload;
+    const id = parsed.entity;
+    const enabled = bool(states.get(`${id}/enabled`)?.payload.value);
+    const stowed = bool(states.get(`${id}/stowed`)?.payload.value);
+    const subArray = str(states.get(`${id}/subarray`)?.payload.value) ?? "main";
+    const commanded = states.get(`${id}/commanded`)?.payload.value as
+      | Record<string, unknown>
+      | undefined;
+    const lastCalibration = states.get(`${id}/last_calibration`)?.payload.value;
+
+    const metrics: RtaDishMetrics = {
+      dishId: id,
+      subArray,
+      condition: conditionFor(payload, enabled, stowed),
+      temperatureC: kelvinToCelsius(num(payload.temperature_k)),
+      systemTemperatureC: null,
+      systemTemperatureK: num(payload.system_temperature_k),
+      powerW: num(payload.power_w),
+      azimuthDeg: radiansToDegrees(num(payload.azimuth_rad)),
+      elevationDeg: radiansToDegrees(num(payload.elevation_rad)),
+      commandedAzimuthDeg: radiansToDegrees(num(commanded?.azimuth_rad)),
+      commandedElevationDeg: radiansToDegrees(num(commanded?.elevation_rad)),
+      faultCode: str(payload.fault_code) ?? "none",
+      enabled,
+      stowed,
+      lastCalibrationAt: toIso(lastCalibration),
+      updatedAt: state.timestamp,
+      scanId: str(payload.scan_id),
+      scanProgress: num(payload.scan_progress),
+      snrDb: num(payload.snr_db),
+    };
+
     entries.push({
-      id: payload.dishId ?? id,
-      metrics: payload,
-      subArray: payload.subArray ?? "main",
-      condition: normalizeCondition(payload.condition),
-      temperatureC: asNumber(payload.temperatureC),
-      powerW: asNumber(payload.powerW),
+      id,
+      metrics,
+      subArray,
+      condition: metrics.condition ?? "UNKNOWN",
+      temperatureC: metrics.temperatureC ?? null,
+      powerW: metrics.powerW ?? null,
       updatedAt: state.timestamp,
       topic: state.topic,
     });
@@ -98,7 +282,7 @@ export function getDishes(topics: Record<string, TopicState>): DishEntry[] {
   if (entries.length === 0) {
     // Placeholder rack so the operator still sees the 100-dish layout.
     return Array.from({ length: RTA_DISH_COUNT }, (_, index) => ({
-      id: `D-${String(index + 1).padStart(3, "0")}`,
+      id: `dish-${String(index + 1).padStart(3, "0")}`,
       metrics: null,
       subArray: "main",
       condition: "UNKNOWN" as const,
@@ -164,7 +348,7 @@ export function summarizeDishes(
       if (maxTemperatureC === null || dish.temperatureC > maxTemperatureC) {
         maxTemperatureC = dish.temperatureC;
       }
-      if (dish.temperatureC >= RTA_DISH_TEMP_LIMIT_C) hotDishes += 1;
+      if (dish.temperatureC >= RTA_DISH_TEMP_WARN_C) hotDishes += 1;
     }
 
     if (dish.powerW !== null) {
@@ -177,13 +361,10 @@ export function summarizeDishes(
     }
   }
 
-  // Prefer the count derived from per-dish metrics once every dish reports, so
-  // the summary can never contradict the rack; fall back to the controller's
-  // own count while telemetry is still partial.
-  const reporting = dishes.filter((dish) => dish.metrics !== null).length;
-  const allReporting = reporting > 0 && reporting === dishes.length;
+  // Prefer the controller's own count: `active_dishes` is authoritative and is
+  // republished whenever a dish enters or leaves service.
   const reportedOperational =
-    !allReporting && typeof arrayStatus?.operationalDishes === "number"
+    typeof arrayStatus?.operationalDishes === "number"
       ? arrayStatus.operationalDishes
       : operational;
 
@@ -203,11 +384,9 @@ export function summarizeDishes(
   };
 }
 
-export function dishTone(
-  dish: DishEntry,
-): "ok" | "warn" | "alert" | "neutral" {
+export function dishTone(dish: DishEntry): "ok" | "warn" | "alert" | "neutral" {
   if (!dish.metrics) return "neutral";
-  if (dish.temperatureC !== null && dish.temperatureC >= RTA_DISH_TEMP_LIMIT_C) return "alert";
+  if (dish.temperatureC !== null && dish.temperatureC >= RTA_DISH_TEMP_WARN_C) return "alert";
   if (dish.condition === "OFFLINE" || dish.condition === "DISABLED") return "alert";
   if (dish.condition === "STOWED" || dish.condition === "DEGRADED") return "warn";
   return "ok";
@@ -224,27 +403,27 @@ export function deriveRtaAlerts(
   arrayStatus: RtaArrayStatus | null,
 ): DerivedAlert[] {
   const alerts: DerivedAlert[] = [];
-  const hasDishData = summary.unknown < summary.registered || summary.registered === 0;
 
-  if (summary.registered > 0 && hasDishData && summary.operational < RTA_MIN_OPERATIONAL_DISHES) {
+  if (summary.registered > 0 && summary.operational < RTA_MIN_OPERATIONAL_DISHES) {
     alerts.push({
       tone: "alert",
       message: `Operational dishes ${summary.operational} — below the ${RTA_MIN_OPERATIONAL_DISHES}-dish minimum.`,
     });
   }
 
-  const wind = asNumber(arrayStatus?.windSpeedMs);
-  if (wind !== null && wind >= RTA_WIND_STOW_LIMIT_MS) {
+  if (arrayStatus?.windStow) {
     alerts.push({
       tone: "alert",
-      message: `Wind ${wind.toFixed(1)} m/s ≥ ${RTA_WIND_STOW_LIMIT_MS} m/s — emergency stowage required.`,
+      message: "Wind stow engaged — all dishes pointed at zenith and scans paused.",
     });
   }
 
   if (summary.hotDishes > 0) {
     alerts.push({
       tone: "warn",
-      message: `${summary.hotDishes} dish${summary.hotDishes === 1 ? "" : "es"} above ${RTA_DISH_TEMP_LIMIT_C} °C.`,
+      message: `${summary.hotDishes} dish${summary.hotDishes === 1 ? "" : "es"} above ${RTA_DISH_TEMP_WARN_C.toFixed(
+        1,
+      )} °C.`,
     });
   }
 
@@ -256,12 +435,91 @@ export interface ScanPoint {
   timestamp: string;
 }
 
-export function getScanSamples(stream: Array<{ topic: string; payload: Record<string, unknown>; timestamp: string }>): ScanPoint[] {
+/** Minimal shape of the SSE `event` channel payloads. */
+export interface ServiceEventLike {
+  kind: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+}
+
+/**
+ * Name of the field a scan points at.
+ *
+ * `events/scan` sends the target as `{ra_rad, dec_rad, fov_rad}` rather than a
+ * catalogue id, so fall back to a coordinate label instead of dropping the
+ * identity and showing "unknown".
+ */
+export function scanTargetLabel(payload: Record<string, unknown>): string {
+  const name = str(payload.target);
+  if (name) return name;
+  const ra = radiansToDegrees(num(payload.ra_rad));
+  const dec = radiansToDegrees(num(payload.dec_rad));
+  if (ra === null || dec === null) return "unknown";
+  return `RA ${ra.toFixed(1)}° / Dec ${dec.toFixed(1)}°`;
+}
+
+/**
+ * Geometry of the most recent scan that started, taken from
+ * `arl/rta/events/scan` (`event: "started"`). The image grid only exists in
+ * that event, so it is the one thing the canvas cannot derive from telemetry.
+ */
+export function getLatestScanContext(events: ServiceEventLike[]): RtaScanContext | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.kind !== "scan") continue;
+    if (str(event.payload.event) !== "started") continue;
+
+    const scanId = str(event.payload.scan_id);
+    const ra = num(event.payload.ra_rad);
+    const dec = num(event.payload.dec_rad);
+    const fov = num(event.payload.fov_rad);
+    if (!scanId || ra === null || dec === null || fov === null) continue;
+
+    return {
+      scanId,
+      target: scanTargetLabel(event.payload),
+      raRad: ra,
+      decRad: dec,
+      fovRad: fov,
+      bandHz: num(event.payload.band_hz) ?? 0,
+      gridSize: num(event.payload.grid_size) ?? 128,
+      overlap: num(event.payload.overlap) ?? 3,
+      dishes: Array.isArray(event.payload.dishes)
+        ? (event.payload.dishes as unknown[]).map(String)
+        : [],
+      expectedDurationS: num(event.payload.expected_duration_s) ?? 0,
+      origin: str(event.payload.origin) ?? "command",
+      startedAt: event.timestamp,
+    };
+  }
+  return null;
+}
+
+/** Every `telemetry/scan` sample in the live ring buffer, in arrival order. */
+export function getScanSamples(
+  stream: Array<{ topic: string; payload: Record<string, unknown>; timestamp: string }>,
+): ScanPoint[] {
   const points: ScanPoint[] = [];
   for (const event of stream) {
-    if (!/\/rta\/scan\/[^/]+\/sample$/.test(event.topic)) continue;
+    const parsed = parseTopic(event.topic);
+    if (parsed.service !== "RTA" || parsed.kind !== "telemetry" || parsed.name !== "scan") continue;
+    if (!parsed.entity) continue;
+    const payload = event.payload;
     points.push({
-      sample: event.payload as RtaScanSample,
+      sample: {
+        dishId: parsed.entity,
+        scanId: str(payload.scan_id),
+        raOffsetRad: num(payload.pointing_offset_ra_rad),
+        decOffsetRad: num(payload.pointing_offset_dec_rad),
+        signalStrength: num(payload.signal_strength),
+        snrDb: num(payload.snr_db),
+        bandHz: num(payload.band_hz),
+        scanProgress: num(payload.scan_progress),
+        temperatureC: kelvinToCelsius(num(payload.temperature_k)),
+        powerW: num(payload.power_w),
+        faultCode: str(payload.fault_code) ?? "none",
+        status: bool(payload.status),
+      },
       timestamp: event.timestamp,
     });
   }

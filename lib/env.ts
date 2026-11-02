@@ -7,6 +7,9 @@ import { z } from "zod";
  * called at runtime. This keeps `next build` (which imports route modules for
  * static analysis) independent from the deployment secrets, while still
  * failing fast on the first request when the configuration is incomplete.
+ *
+ * The defaults mirror the simulator stack in the provided `arl-test.yaml`
+ * (API on :8080 over plain HTTP, anonymous broker on :1883).
  */
 
 const booleanish = z
@@ -19,12 +22,17 @@ const envSchema = z.object({
   // ARL REST API -----------------------------------------------------------
   ARL_API_ADDRESS: z.string().min(1, "ARL_API_ADDRESS is required"),
   ARL_API_PORT: z.coerce.number().int().positive().max(65535),
-  ARL_API_PROTOCOL: z.enum(["http", "https"]).default("https"),
+  ARL_API_PROTOCOL: z.enum(["http", "https"]).default("http"),
   ARL_API_TLS_VERIFY: booleanish.default("false"),
   ARL_API_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
-  ARL_API_PATH_METADATA: z.string().startsWith("/").default("/metadata"),
-  ARL_API_PATH_PARAMETERS: z.string().startsWith("/").default("/parameters"),
-  ARL_API_PATH_TARGETS: z.string().startsWith("/").default("/targets"),
+  ARL_API_PATH_TARGETS: z.string().startsWith("/").default("/v1/targets"),
+  ARL_API_PATH_ALERT_LIMITS: z.string().startsWith("/").default("/v1/alert-limits"),
+  ARL_API_PATH_RESEARCHER: z.string().startsWith("/").default("/v1/researchers"),
+  ARL_API_PATH_VERIFY: z.string().startsWith("/").default("/v1/researchers/verify"),
+
+  // Operator identity used for command attribution and researcher checks.
+  ARL_RESEARCHER_CODE: z.string().trim().min(1).default("arl-as3"),
+  ARL_RESEARCHER_NAME: z.string().trim().default("Person A"),
 
   // MQTT broker ------------------------------------------------------------
   MQTT_BROKER_ADDRESS: z.string().min(1, "MQTT_BROKER_ADDRESS is required"),
@@ -55,9 +63,12 @@ function parseEnv(): Env {
     ARL_API_PROTOCOL: process.env.ARL_API_PROTOCOL,
     ARL_API_TLS_VERIFY: process.env.ARL_API_TLS_VERIFY,
     ARL_API_TIMEOUT_MS: process.env.ARL_API_TIMEOUT_MS,
-    ARL_API_PATH_METADATA: process.env.ARL_API_PATH_METADATA,
-    ARL_API_PATH_PARAMETERS: process.env.ARL_API_PATH_PARAMETERS,
     ARL_API_PATH_TARGETS: process.env.ARL_API_PATH_TARGETS,
+    ARL_API_PATH_ALERT_LIMITS: process.env.ARL_API_PATH_ALERT_LIMITS,
+    ARL_API_PATH_RESEARCHER: process.env.ARL_API_PATH_RESEARCHER,
+    ARL_API_PATH_VERIFY: process.env.ARL_API_PATH_VERIFY,
+    ARL_RESEARCHER_CODE: process.env.ARL_RESEARCHER_CODE,
+    ARL_RESEARCHER_NAME: process.env.ARL_RESEARCHER_NAME,
     MQTT_BROKER_ADDRESS: process.env.MQTT_BROKER_ADDRESS,
     MQTT_BROKER_PORT: process.env.MQTT_BROKER_PORT,
     MQTT_BROKER_USER: process.env.MQTT_BROKER_USER,

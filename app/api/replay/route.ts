@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSnapshot, getTelemetryBounds } from "@/lib/snapshot";
+import { getLatestSampleAt, getSnapshot, getTelemetryBounds } from "@/lib/snapshot";
 import { toService } from "@/lib/types";
 
 /**
@@ -40,7 +40,11 @@ export async function GET(request: NextRequest) {
     }
 
     const rawTimestamp = params.get("timestamp") ?? params.get("target");
-    const target = parseTimestamp(rawTimestamp) ?? new Date();
+    // Default to the platform clock: accelerated services publish on a
+    // simulated timeline that runs ahead of wall clock.
+    const latest = rawTimestamp ? null : await getLatestSampleAt(service);
+    const fallback = latest && latest.getTime() > Date.now() ? latest : new Date();
+    const target = parseTimestamp(rawTimestamp) ?? fallback;
     const snapshot = await getSnapshot(target, service);
 
     return NextResponse.json(snapshot, { headers: { "Cache-Control": "no-store" } });

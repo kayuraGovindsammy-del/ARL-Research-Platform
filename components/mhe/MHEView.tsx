@@ -39,7 +39,9 @@ export function MHEView() {
 
   const [selectedRoomId, setSelectedRoomId] = useState("common");
   const [temperatureDraft, setTemperatureDraft] = useState("22");
-  const [lightDraft, setLightDraft] = useState(60);
+  const [lightDraft, setLightDraft] = useState(800);
+  const [lightWindowStart, setLightWindowStart] = useState("06:00");
+  const [lightWindowEnd, setLightWindowEnd] = useState("22:00");
 
   const rooms = useMemo(() => getRooms(topics), [topics]);
   const crew = useMemo(() => getCrew(topics), [topics]);
@@ -58,13 +60,16 @@ export function MHEView() {
     if (typeof selectedRoom.telemetry.temperatureC === "number") {
       setTemperatureDraft(selectedRoom.telemetry.temperatureC.toFixed(1));
     }
-    if (typeof selectedRoom.telemetry.lightLevelPct === "number") {
-      setLightDraft(Math.round(selectedRoom.telemetry.lightLevelPct));
+    if (typeof selectedRoom.telemetry.lightingLux === "number") {
+      setLightDraft(Math.round(selectedRoom.telemetry.lightingLux));
     }
   }, [selectedRoom?.id, selectedRoom?.telemetry]);
 
-  const issue = (action: string, payload: Record<string, unknown>, label: string) =>
-    run({ service: "MHE", action, issuedBy: operator, ...payload }, label);
+  /** Hydroponics runs grow lights an order of magnitude brighter than the rest. */
+  const lightMaxLux = selectedRoom?.id === "hydroponics" ? 30000 : 1000;
+
+  const issue = (control: string, entity: string, value: unknown, label: string) =>
+    run({ service: "MHE", entity, control, value, researcher: operator }, label);
 
   const surveyScore = (value: unknown) =>
     typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(value, 1), 10) : null;
@@ -178,7 +183,7 @@ export function MHEView() {
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {crew.map((member) => {
                 const heartRate = member.health?.heartRateBpm;
-                const bodyTemp = member.health?.bodyTempC;
+                const bodyTemp = member.health?.bodyTemperatureC;
                 const hrAlert = typeof heartRate === "number" && heartRate >= MHE_HEART_RATE_LIMIT_BPM;
                 return (
                   <div
@@ -194,7 +199,7 @@ export function MHEView() {
                     <div className="mt-1 flex items-end justify-between">
                       <div>
                         <p className="font-mono text-xl">
-                          {heartRate !== undefined ? Math.round(heartRate) : "—"}
+                          {typeof heartRate === "number" ? Math.round(heartRate) : "—"}
                           <span className="ml-1 text-[10px] text-console-muted">bpm</span>
                         </p>
                         <p className="font-mono text-[11px] text-console-muted">
@@ -206,8 +211,9 @@ export function MHEView() {
                         className="btn px-2 py-1 text-[9px]"
                         onClick={() =>
                           void issue(
-                            "crew.wellnessCheck",
-                            { crewId: member.id },
+                            "crew_wellness_check",
+                            member.id,
+                            true,
                             `Wellness check ${member.id}`,
                           )
                         }
@@ -322,8 +328,9 @@ export function MHEView() {
                     onClick={() =>
                       selectedRoom &&
                       void issue(
-                        "room.temperature",
-                        { roomId: selectedRoom.id, temperatureC: Number(temperatureDraft) },
+                        "adjust_temperature",
+                        selectedRoom.id,
+                        Number(temperatureDraft) + 273.15,
                         `Set ${selectedRoom.id} to ${temperatureDraft} °C`,
                       )
                     }
@@ -331,20 +338,24 @@ export function MHEView() {
                     Apply
                   </button>
                 </div>
+                <p className="mt-1 text-[10px] text-console-muted">
+                  Sent as kelvin ({formatNumber(Number(temperatureDraft) + 273.15, 2)} K); accepted
+                  range 285–300 K.
+                </p>
               </div>
 
               <div>
                 <label className="label" htmlFor="room-light">
-                  Light level — {lightDraft}%
+                  Lighting level — {lightDraft} lx
                 </label>
                 <div className="flex items-center gap-2">
                   <input
                     id="room-light"
                     type="range"
                     min={0}
-                    max={100}
-                    step={5}
-                    value={lightDraft}
+                    max={lightMaxLux}
+                    step={lightMaxLux <= 1000 ? 50 : 500}
+                    value={Math.min(lightDraft, lightMaxLux)}
                     onChange={(event) => setLightDraft(Number(event.target.value))}
                     className="scrubber flex-1"
                   />
@@ -355,14 +366,31 @@ export function MHEView() {
                     onClick={() =>
                       selectedRoom &&
                       void issue(
-                        "room.light",
-                        { roomId: selectedRoom.id, lightLevelPct: lightDraft },
-                        `Set ${selectedRoom.id} lighting to ${lightDraft}%`,
+                        "lighting_schedule",
+                        selectedRoom.id,
+                        { start: lightWindowStart, end: lightWindowEnd, level_lux: lightDraft },
+                        `Set ${selectedRoom.id} lighting to ${lightDraft} lx`,
                       )
                     }
                   >
                     Apply
                   </button>
+                </div>
+                <div className="mt-1 grid grid-cols-2 gap-2">
+                  <input
+                    aria-label="Lighting window start"
+                    className="input"
+                    value={lightWindowStart}
+                    onChange={(event) => setLightWindowStart(event.target.value)}
+                    placeholder="06:00"
+                  />
+                  <input
+                    aria-label="Lighting window end"
+                    className="input"
+                    value={lightWindowEnd}
+                    onChange={(event) => setLightWindowEnd(event.target.value)}
+                    placeholder="22:00"
+                  />
                 </div>
               </div>
 
@@ -372,7 +400,7 @@ export function MHEView() {
                   className="btn col-span-1"
                   disabled={pending !== null}
                   onClick={() =>
-                    void issue("airlock.pressurize", { roomId: "airlock" }, "Pressurize airlock")
+                    void issue("cycle_airlock", "airlock", "pressurise", "Pressurise airlock")
                   }
                 >
                   Pressurize airlock
@@ -383,13 +411,29 @@ export function MHEView() {
                   disabled={pending !== null}
                   onClick={() =>
                     void issue(
-                      "crew.wellnessCheck",
-                      { crewId: crew[0]?.id ?? "crew-1" },
-                      "Request wellness check",
+                      "cycle_airlock",
+                      "airlock",
+                      "depressurise",
+                      "Depressurise airlock",
                     )
                   }
                 >
-                  Wellness (crew-1)
+                  Depressurize airlock
+                </button>
+                <button
+                  type="button"
+                  className="btn col-span-2"
+                  disabled={pending !== null}
+                  onClick={() =>
+                    void issue(
+                      "crew_wellness_check",
+                      crew[0]?.id ?? "crew-1",
+                      true,
+                      `Wellness check ${crew[0]?.id ?? "crew-1"}`,
+                    )
+                  }
+                >
+                  Wellness check ({crew[0]?.id ?? "crew-1"})
                 </button>
               </div>
 

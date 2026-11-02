@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { arlApiDocsUrl, inspectEnv } from "@/lib/env";
+import { arlApiDocsUrl, env, inspectEnv } from "@/lib/env";
 import { getMqttWorker } from "@/lib/mqtt-worker";
 import { dbReady, isDatabaseBusy, prisma } from "@/lib/prisma";
 
@@ -65,6 +65,9 @@ export async function GET() {
       arlApi: {
         docsUrl: envStatus.ok ? arlApiDocsUrl() : null,
       },
+      researcher: envStatus.ok
+        ? { code: env().ARL_RESEARCHER_CODE, name: env().ARL_RESEARCHER_NAME }
+        : null,
     },
     { status: healthy ? 200 : 503, headers: { "Cache-Control": "no-store" } },
   );

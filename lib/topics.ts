@@ -1,142 +1,146 @@
-import { SERVICES, toService, type Service } from "./types";
+import { toIngestService, type IngestService } from "./types";
 
 /**
- * Topic taxonomy used across the platform:
+ * Topic taxonomy published by the ARL services:
  *
- *   arl/rta/array/status                  array + scan state
- *   arl/rta/dish/<dishId>/metrics         per-dish metrics (2 min cadence)
- *   arl/rta/scan/<scanId>/sample          high frequency scan sample (1 Hz)
- *   arl/mhe/habitat/status                habitat mode / airlock / lighting
- *   arl/mhe/room/<roomId>/telemetry       per-room environment (5 min cadence)
- *   arl/mhe/crew/<crewId>/health          crew vitals (1 min cadence)
- *   arl/mhe/crew/<crewId>/survey          daily survey submission
- *   arl/opg/power                         aggregated power state
- *   arl/opg/source/<source>/status        per-source status
- *   arl/<service>/cmd/<action>            commands published by this platform
+ *   arl/<svc>/$topology                          retained capability document
+ *   arl/<svc>/<entity>/telemetry/<stream>        periodic samples
+ *   arl/<svc>/<entity>/state/<item>              retained latest state
+ *   arl/<svc>/events/<kind>                      one-off events (alert, scan, …)
+ *   arl/<svc>/cmd/<entity>/<control>             commands published by us
+ *   arl/<svc>/ack/<command_id>                   command acknowledgements
  *
  * Parsing is prefix agnostic: the first segment matching a known service name
  * anchors the topic, so a custom MQTT_TOPIC_PREFIX requires no client changes.
  */
 
 export type TopicKind =
-  | "rta.array.status"
-  | "rta.dish.metrics"
-  | "rta.scan.sample"
-  | "mhe.habitat.status"
-  | "mhe.room.telemetry"
-  | "mhe.crew.health"
-  | "mhe.crew.survey"
-  | "opg.power"
-  | "opg.source.status"
+  | "topology"
+  | "telemetry"
+  | "state"
+  | "event"
   | "command"
+  | "ack"
   | "unknown";
 
 export interface ParsedTopic {
-  service: Service | null;
+  service: IngestService | null;
   kind: TopicKind;
-  /** Entity identifier (dish id, room id, crew id, source name, scan id). */
-  entityId: string | null;
+  /** Dish / room / crew / sub-array / site id, or "global". */
+  entity: string | null;
+  /** Telemetry stream, state item, event kind, control name or command id. */
+  name: string | null;
+  topic: string;
   segments: string[];
 }
 
+const EMPTY = (topic: string, segments: string[]): ParsedTopic => ({
+  service: null,
+  kind: "unknown",
+  entity: null,
+  name: null,
+  topic,
+  segments,
+});
+
 export function parseTopic(topic: string): ParsedTopic {
   const segments = topic.split("/").filter(Boolean);
-  const anchor = segments.findIndex((segment) => toService(segment) !== null);
+  const anchor = segments.findIndex((segment) => toIngestService(segment) !== null);
+  if (anchor === -1) return EMPTY(topic, segments);
 
-  if (anchor === -1) {
-    return { service: null, kind: "unknown", entityId: null, segments };
-  }
-
-  const service = toService(segments[anchor])!;
+  const service = toIngestService(segments[anchor])!;
   const rest = segments.slice(anchor + 1);
 
+  if (rest[0] === "$topology") {
+    return { service, kind: "topology", entity: null, name: "$topology", topic, segments };
+  }
+  if (rest[0] === "events") {
+    return { service, kind: "event", entity: null, name: rest[1] ?? null, topic, segments };
+  }
   if (rest[0] === "cmd") {
-    return { service, kind: "command", entityId: rest.slice(1).join("/"), segments };
+    return { service, kind: "command", entity: rest[1] ?? null, name: rest[2] ?? null, topic, segments };
+  }
+  if (rest[0] === "ack") {
+    return { service, kind: "ack", entity: null, name: rest[1] ?? null, topic, segments };
+  }
+  if (rest.length >= 3 && rest[1] === "telemetry") {
+    return { service, kind: "telemetry", entity: rest[0], name: rest[2], topic, segments };
+  }
+  if (rest.length >= 3 && rest[1] === "state") {
+    return { service, kind: "state", entity: rest[0], name: rest[2], topic, segments };
   }
 
-  switch (service) {
-    case "RTA":
-      if (rest[0] === "array" && rest[1] === "status") {
-        return { service, kind: "rta.array.status", entityId: null, segments };
-      }
-      if (rest[0] === "dish" && rest[2] === "metrics") {
-        return { service, kind: "rta.dish.metrics", entityId: rest[1] ?? null, segments };
-      }
-      if (rest[0] === "scan" && (rest[2] === "sample" || rest[1] === "sample")) {
-        return {
-          service,
-          kind: "rta.scan.sample",
-          entityId: rest[1] === "sample" ? "" : (rest[1] ?? null),
-          segments,
-        };
-      }
-      return { service, kind: "unknown", entityId: null, segments };
+  return { service, kind: "unknown", entity: rest[0] ?? null, name: null, topic, segments };
+}
 
-    case "MHE":
-      if (rest[0] === "habitat" && rest[1] === "status") {
-        return { service, kind: "mhe.habitat.status", entityId: null, segments };
-      }
-      if (rest[0] === "room" && rest[2] === "telemetry") {
-        return { service, kind: "mhe.room.telemetry", entityId: rest[1] ?? null, segments };
-      }
-      if (rest[0] === "crew" && rest[2] === "health") {
-        return { service, kind: "mhe.crew.health", entityId: rest[1] ?? null, segments };
-      }
-      if (rest[0] === "crew" && rest[2] === "survey") {
-        return { service, kind: "mhe.crew.survey", entityId: rest[1] ?? null, segments };
-      }
-      return { service, kind: "unknown", entityId: null, segments };
+/** True when `topic` matches an `arl/…/+/…` style pattern. */
+export function topicMatches(topic: string, pattern: string): boolean {
+  const topicParts = topic.split("/").filter(Boolean);
+  const patternParts = pattern.split("/").filter(Boolean);
+  if (topicParts.length !== patternParts.length) return false;
+  return patternParts.every((part, index) => part === "+" || part === topicParts[index]);
+}
 
-    case "OPG":
-      if (rest[0] === "power") {
-        return { service, kind: "opg.power", entityId: null, segments };
-      }
-      if (rest[0] === "source" && rest[2] === "status") {
-        return { service, kind: "opg.source.status", entityId: rest[1] ?? null, segments };
-      }
-      return { service, kind: "unknown", entityId: null, segments };
-
-    default:
-      return { service: null, kind: "unknown", entityId: null, segments };
+/**
+ * Find the value of a retained state item, e.g.
+ * `stateValue(topics, "rta", "main", "scan_state")`.
+ */
+export function stateValue(
+  topics: Record<string, { payload: Record<string, unknown> }>,
+  service: string,
+  entity: string,
+  item: string,
+): unknown {
+  const suffix = `/${service}/${entity}/state/${item}`;
+  for (const [topic, state] of Object.entries(topics)) {
+    if (topic.endsWith(suffix)) return state.payload.value;
   }
+  return undefined;
 }
 
-/** True when `topic` ends with the given slash-delimited suffix. */
-export function topicEndsWith(topic: string, suffix: string): boolean {
-  const normalized = suffix.startsWith("/") ? suffix.slice(1) : suffix;
-  return topic === normalized || topic.endsWith(`/${normalized}`);
-}
-
-/** Extract the trailing entity id for `prefix/<id>/rest` shaped topics. */
-export function topicEntityId(topic: string, marker: string): string | null {
-  const segments = topic.split("/");
-  const index = segments.indexOf(marker);
-  if (index === -1 || index + 1 >= segments.length) return null;
-  return segments[index + 1] || null;
+/** Topic timestamp for a retained state item (ISO) when present. */
+export function stateAt(
+  topics: Record<string, { timestamp: string }>,
+  service: string,
+  entity: string,
+  item: string,
+): string | null {
+  const suffix = `/${service}/${entity}/state/${item}`;
+  for (const [topic, state] of Object.entries(topics)) {
+    if (topic.endsWith(suffix)) return state.timestamp;
+  }
+  return null;
 }
 
 export function commandTopic(
   prefix: string,
-  service: Service,
-  action: string,
+  service: IngestService,
+  entity: string,
+  control: string,
 ): string {
-  return `${prefix}/${service.toLowerCase()}/cmd/${action}`;
+  return `${prefix}/${service.toLowerCase()}/cmd/${entity}/${control}`;
+}
+
+export function ackTopic(prefix: string, service: IngestService, commandId: string): string {
+  return `${prefix}/${service.toLowerCase()}/ack/${commandId}`;
 }
 
 export function telemetryWildcard(prefix: string): string {
   return `${prefix}/#`;
 }
 
-export const SERVICE_VALUES = SERVICES;
-
-export function dishTopic(prefix: string, dishId: string): string {
-  return `${prefix}/rta/dish/${dishId}/metrics`;
+/** Convenience builders used by selectors and tests. */
+export function telemetryTopic(
+  prefix: string,
+  service: IngestService,
+  entity: string,
+  stream: string,
+): string {
+  return `${prefix}/${service.toLowerCase()}/${entity}/telemetry/${stream}`;
 }
 
-export function roomTopic(prefix: string, roomId: string): string {
-  return `${prefix}/mhe/room/${roomId}/telemetry`;
+export function eventTopic(prefix: string, service: IngestService, kind: string): string {
+  return `${prefix}/${service.toLowerCase()}/events/${kind}`;
 }
 
-export function crewHealthTopic(prefix: string, crewId: string): string {
-  return `${prefix}/mhe/crew/${crewId}/health`;
-}
+export const SERVICE_VALUES = ["RTA", "MHE", "OPG"] as const;

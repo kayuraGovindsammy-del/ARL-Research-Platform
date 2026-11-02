@@ -13,7 +13,9 @@
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "broker": "node scripts/dev-broker.mjs",
-    "simulate": "node scripts/mqtt-simulator.mjs"
+    "simulate": "node scripts/mqtt-simulator.mjs",
+    "topics": "node scripts/mqtt-topics.mjs",
+    "pub": "node scripts/mqtt-pub.mjs"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",

@@ -7,13 +7,15 @@ import {
   deriveRtaAlerts,
   getArrayStatus,
   getDishes,
+  getLatestScanContext,
   getScanSamples,
   summarizeDishes,
 } from "@/lib/rta-selectors";
 import { useTelemetry } from "@/lib/telemetry-store";
 import {
-  RTA_DISH_TEMP_LIMIT_C,
+  RTA_DISH_TEMP_WARN_C,
   RTA_MIN_OPERATIONAL_DISHES,
+  RTA_WIND_RELEASE_MS,
   RTA_WIND_STOW_LIMIT_MS,
 } from "@/lib/types";
 import { useCommandRunner } from "@/lib/use-command";
@@ -28,12 +30,14 @@ const SCAN_TONE: Record<string, "ok" | "warn" | "alert" | "info" | "neutral"> = 
   SCANNING: "ok",
   PAUSED: "warn",
   IDLE: "info",
+  SCHEDULED: "info",
   STOWED: "alert",
   CANCELLED: "alert",
+  COMPLETE: "neutral",
 };
 
 export function RTAView() {
-  const { topics, stream, lastTelemetryAt, mode } = useTelemetry();
+  const { topics, stream, events, lastTelemetryAt, mode } = useTelemetry();
   const { operator, setOperator } = useOperator();
   const { run, pending, feedback } = useCommandRunner();
 
@@ -43,8 +47,9 @@ export function RTAView() {
   const [targetsLoading, setTargetsLoading] = useState(true);
   const [targetingMode, setTargetingMode] = useState<"preset" | "custom">("preset");
   const [targetId, setTargetId] = useState("");
-  const [customRa, setCustomRa] = useState("05.575");
-  const [customDec, setCustomDec] = useState("-05.391");
+  const [customRaHours, setCustomRaHours] = useState("5.575");
+  const [customDecDeg, setCustomDecDeg] = useState("-5.391");
+  const [frequencyMhz, setFrequencyMhz] = useState("1420");
   const [subArrayDraft, setSubArrayDraft] = useState("main");
 
   const arrayState = useMemo(() => getArrayStatus(topics), [topics]);
@@ -99,6 +104,7 @@ export function RTAView() {
   );
 
   const scanPoints = useMemo(() => getScanSamples(stream), [stream]);
+  const scanContext = useMemo(() => getLatestScanContext(events), [events]);
   const scanStatus = (arrayState?.status.status ?? "IDLE").toUpperCase();
   const scanning = scanStatus === "SCANNING";
   const derivedAlerts = useMemo(
@@ -108,31 +114,47 @@ export function RTAView() {
 
   const activeTargetLabel =
     arrayState?.status.targetName ?? arrayState?.status.targetId ?? "none";
-  const wind = arrayState?.status.windSpeedMs;
+  const windStow = arrayState?.status.windStow === true;
 
+  /**
+   * `set_target` and `start_scan` are separate controls: the target must be
+   * committed before the scan starts, and the service rejects the start if the
+   * target is below 15° elevation, fewer than three dishes are in service, or
+   * wind stow is engaged.
+   */
   const submitStart = async () => {
-    if (targetingMode === "preset" && !targetId) return;
     const custom = targetingMode === "custom";
-    const ra = custom ? Number(customRa) : null;
-    const dec = custom ? Number(customDec) : null;
-    if (custom && (!Number.isFinite(ra) || !Number.isFinite(dec))) return;
+    const raHours = Number(customRaHours);
+    const decDeg = Number(customDecDeg);
+    if (custom && (!Number.isFinite(raHours) || !Number.isFinite(decDeg))) return;
+    if (!custom && !targetId) return;
+
+    const value = custom
+      ? {
+          ra_rad: ((raHours % 24) + 24) % 24 * (Math.PI / 12),
+          dec_rad: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, decDeg * (Math.PI / 180))),
+          fov_rad: 0.02,
+        }
+      : targetId;
+
+    const targeted = await run(
+      { service: "RTA", entity: "main", control: "set_target", value, researcher: operator },
+      `Set target ${custom ? `RA ${raHours}h / Dec ${decDeg}°` : targetId}`,
+    );
+    if (!targeted) return;
 
     await run(
-      {
-        service: "RTA",
-        action: "scan.start",
-        targetId: custom ? `custom:${customRa}:${customDec}` : targetId,
-        custom,
-        ra: ra ?? undefined,
-        dec: dec ?? undefined,
-        issuedBy: operator,
-      },
-      custom ? `Start custom scan RA ${customRa} / Dec ${customDec}` : `Start scan ${targetId}`,
+      { service: "RTA", entity: "main", control: "start_scan", value: true, researcher: operator },
+      `Start scan ${custom ? "custom position" : targetId}`,
     );
   };
 
-  const issue = (action: string, payload: Record<string, unknown>, label: string) =>
-    run({ service: "RTA", action, issuedBy: operator, ...payload }, label);
+  const issue = (
+    control: string,
+    entity: string,
+    value: unknown,
+    label: string,
+  ) => run({ service: "RTA", entity, control, value, researcher: operator }, label);
 
   return (
     <div className="space-y-4">
@@ -209,9 +231,11 @@ export function RTAView() {
                 label="Mean dish temperature"
                 value={formatNumber(summary.averageTemperatureC, 1)}
                 unit="°C"
-                hint={`Max ${formatNumber(summary.maxTemperatureC, 1)} °C · limit ${RTA_DISH_TEMP_LIMIT_C} °C`}
+                hint={`Max ${formatNumber(summary.maxTemperatureC, 1)} °C · warn ${RTA_DISH_TEMP_WARN_C.toFixed(
+                  1,
+                )} °C`}
                 tone={
-                  summary.maxTemperatureC !== null && summary.maxTemperatureC >= RTA_DISH_TEMP_LIMIT_C
+                  summary.maxTemperatureC !== null && summary.maxTemperatureC >= RTA_DISH_TEMP_WARN_C
                     ? "alert"
                     : "neutral"
                 }
@@ -223,11 +247,14 @@ export function RTAView() {
                 hint="Sum of reporting dishes"
               />
               <Metric
-                label="Wind speed"
-                value={wind !== undefined ? formatNumber(wind, 1) : "—"}
-                unit="m/s"
-                hint={`Stow threshold ${RTA_WIND_STOW_LIMIT_MS} m/s`}
-                tone={typeof wind === "number" && wind >= RTA_WIND_STOW_LIMIT_MS ? "alert" : "neutral"}
+                label="Wind stow"
+                value={windStow ? "ENGAGED" : "CLEAR"}
+                hint={
+                  windStow
+                    ? `Releases below ${RTA_WIND_RELEASE_MS} m/s · stows at ${RTA_WIND_STOW_LIMIT_MS} m/s`
+                    : `Stows at ${RTA_WIND_STOW_LIMIT_MS} m/s gust`
+                }
+                tone={windStow ? "alert" : "ok"}
               />
               <Metric
                 label="Scan"
@@ -286,23 +313,19 @@ export function RTAView() {
           </Panel>
 
           <Panel
-            title="Scan composite"
-            subtitle="High-frequency scan samples rendered as a dish-offset × frequency heatmap."
+            title="Scan image"
+            subtitle="N×N pixels from pointing offsets and signal strength, averaged over the scan's overlap samples."
             actions={
               <Badge tone={scanning ? "ok" : "neutral"}>
                 {scanPoints.length} pts · {scanning ? "1 Hz" : "idle"}
               </Badge>
             }
           >
-            <ScanHeatmap
-              samples={scanPoints}
-              scanning={scanning}
-              activeScanId={arrayState?.status.scanId ?? null}
-            />
+            <ScanHeatmap samples={scanPoints} scanning={scanning} context={scanContext} />
             {mode === "replay" && (
               <p className="mt-2 text-[11px] text-console-muted">
-                Replay snapshots contain the latest state per topic — start a live scan to rebuild the
-                composite map.
+                Replay snapshots contain the latest state per topic — the image is built from the live
+                1 Hz scan stream.
               </p>
             )}
           </Panel>
@@ -394,8 +417,8 @@ export function RTAView() {
                       id="ra"
                       className="input"
                       inputMode="decimal"
-                      value={customRa}
-                      onChange={(event) => setCustomRa(event.target.value)}
+                      value={customRaHours}
+                      onChange={(event) => setCustomRaHours(event.target.value)}
                     />
                   </div>
                   <div>
@@ -406,10 +429,15 @@ export function RTAView() {
                       id="dec"
                       className="input"
                       inputMode="decimal"
-                      value={customDec}
-                      onChange={(event) => setCustomDec(event.target.value)}
+                      value={customDecDeg}
+                      onChange={(event) => setCustomDecDeg(event.target.value)}
                     />
                   </div>
+                  <p className="col-span-2 text-[10px] leading-relaxed text-console-muted">
+                    Sent as <span className="font-mono">{"{ra_rad, dec_rad, fov_rad}"}</span> on
+                    <span className="font-mono"> set_target</span>. The target must be at least 15°
+                    above the horizon before the scan will start.
+                  </p>
                 </div>
               )}
 
@@ -422,15 +450,17 @@ export function RTAView() {
                     pending !== null ||
                     (targetingMode === "preset" && !targetId) ||
                     (targetingMode === "custom" &&
-                      (!Number.isFinite(Number(customRa)) || !Number.isFinite(Number(customDec))))
+                      (!Number.isFinite(Number(customRaHours)) ||
+                        !Number.isFinite(Number(customDecDeg)))) ||
+                    windStow
                   }
                 >
-                  {pending === "scan.start" ? "Starting…" : "Start scan"}
+                  {pending === "set_target" || pending === "start_scan" ? "Starting…" : "Start scan"}
                 </button>
                 <button
                   type="button"
                   className="btn"
-                  onClick={() => void issue("scan.pause", {}, "Pause scan")}
+                  onClick={() => void issue("pause_scan", "main", true, "Pause scan")}
                   disabled={pending !== null || !scanning}
                 >
                   Pause
@@ -438,27 +468,54 @@ export function RTAView() {
                 <button
                   type="button"
                   className="btn"
-                  onClick={() => void issue("scan.resume", {}, "Resume scan")}
-                  disabled={pending !== null || scanStatus !== "PAUSED"}
+                  onClick={() => void issue("start_scan", "main", true, "Resume scan")}
+                  disabled={pending !== null || scanStatus !== "PAUSED" || windStow}
                 >
                   Resume
                 </button>
                 <button
                   type="button"
                   className="btn btn-danger"
-                  onClick={() => void issue("scan.cancel", {}, "Cancel scan")}
-                  disabled={pending !== null || !["SCANNING", "PAUSED"].includes(scanStatus)}
+                  onClick={() => void issue("cancel_scan", "main", true, "Cancel scan")}
+                  disabled={pending !== null || !["SCANNING", "PAUSED", "SCHEDULED"].includes(scanStatus)}
                 >
                   Cancel scan
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-warn"
-                  onClick={() => void issue("array.stow", {}, "Stow array")}
-                  disabled={pending !== null}
-                >
-                  Stow array
-                </button>
+                <div className="flex items-end gap-2">
+                  <div className="flex-1">
+                    <label className="label" htmlFor="frequency">
+                      Band (MHz)
+                    </label>
+                    <input
+                      id="frequency"
+                      className="input"
+                      inputMode="decimal"
+                      value={frequencyMhz}
+                      onChange={(event) => setFrequencyMhz(event.target.value)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() =>
+                      void issue(
+                        "set_observation_frequency",
+                        "main",
+                        Number(frequencyMhz) * 1e6,
+                        `Set band ${frequencyMhz} MHz`,
+                      )
+                    }
+                    disabled={
+                      pending !== null ||
+                      scanning ||
+                      !Number.isFinite(Number(frequencyMhz)) ||
+                      Number(frequencyMhz) < 500 ||
+                      Number(frequencyMhz) > 50000
+                    }
+                  >
+                    Set
+                  </button>
+                </div>
               </div>
 
               {feedback && (
@@ -505,9 +562,10 @@ export function RTAView() {
                     label="Temperature"
                     value={formatNumber(selectedDish.temperatureC, 1)}
                     unit="°C"
+                    hint={`Structure · warn ${RTA_DISH_TEMP_WARN_C.toFixed(1)} °C`}
                     tone={
                       selectedDish.temperatureC !== null &&
-                      selectedDish.temperatureC >= RTA_DISH_TEMP_LIMIT_C
+                      selectedDish.temperatureC >= RTA_DISH_TEMP_WARN_C
                         ? "alert"
                         : "neutral"
                     }
@@ -527,10 +585,30 @@ export function RTAView() {
                     value={formatNumber(selectedDish.metrics?.elevationDeg, 2)}
                     unit="°"
                   />
+                  <Metric
+                    label="System temperature"
+                    value={formatNumber(selectedDish.metrics?.systemTemperatureK, 1)}
+                    unit="K"
+                    hint="Receiver noise temperature"
+                  />
+                  <Metric
+                    label="Fault"
+                    value={titleCase(selectedDish.metrics?.faultCode ?? "none")}
+                    hint={
+                      selectedDish.metrics?.enabled === false
+                        ? "out of service (disabled)"
+                        : selectedDish.metrics?.stowed
+                          ? "stowed"
+                          : "in service"
+                    }
+                  />
                 </div>
 
                 <p className="text-[10px] uppercase tracking-[0.14em] text-console-muted">
                   updated {selectedDish.updatedAt ? `${formatTime(selectedDish.updatedAt)} · ${timeAgo(selectedDish.updatedAt)}` : "—"}
+                  {selectedDish.metrics?.lastCalibrationAt
+                    ? ` · calibrated ${timeAgo(selectedDish.metrics.lastCalibrationAt)}`
+                    : ""}
                 </p>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -538,13 +616,9 @@ export function RTAView() {
                     type="button"
                     className="btn btn-danger"
                     onClick={() =>
-                      void issue(
-                        "dish.disable",
-                        { dishId: selectedDish.id },
-                        `Disable ${selectedDish.id}`,
-                      )
+                      void issue("enable_dish", selectedDish.id, false, `Disable ${selectedDish.id}`)
                     }
-                    disabled={pending !== null}
+                    disabled={pending !== null || selectedDish.metrics?.enabled === false}
                   >
                     Disable dish
                   </button>
@@ -552,13 +626,9 @@ export function RTAView() {
                     type="button"
                     className="btn btn-primary"
                     onClick={() =>
-                      void issue(
-                        "dish.enable",
-                        { dishId: selectedDish.id },
-                        `Enable ${selectedDish.id}`,
-                      )
+                      void issue("enable_dish", selectedDish.id, true, `Enable ${selectedDish.id}`)
                     }
-                    disabled={pending !== null}
+                    disabled={pending !== null || selectedDish.metrics?.enabled === true}
                   >
                     Enable dish
                   </button>
@@ -566,11 +636,31 @@ export function RTAView() {
                     type="button"
                     className="btn col-span-2"
                     onClick={() =>
-                      void issue("dish.stow", { dishId: selectedDish.id }, `Stow ${selectedDish.id}`)
+                      void issue(
+                        "stow_dish",
+                        selectedDish.id,
+                        selectedDish.metrics?.stowed !== true,
+                        `${selectedDish.metrics?.stowed ? "Release" : "Stow"} ${selectedDish.id}`,
+                      )
+                    }
+                    disabled={pending !== null || windStow}
+                  >
+                    {selectedDish.metrics?.stowed ? "Release dish" : "Stow dish"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn col-span-2"
+                    onClick={() =>
+                      void issue(
+                        "request_recalibration",
+                        selectedDish.id,
+                        true,
+                        `Recalibrate ${selectedDish.id}`,
+                      )
                     }
                     disabled={pending !== null}
                   >
-                    Stow dish
+                    Request recalibration (120 s)
                   </button>
                 </div>
 
@@ -591,8 +681,9 @@ export function RTAView() {
                     className="btn"
                     onClick={() =>
                       void issue(
-                        "array.subArray",
-                        { dishId: selectedDish.id, subArray: subArrayDraft.trim() || "main" },
+                        "assign_subarray",
+                        selectedDish.id,
+                        subArrayDraft.trim() || "main",
                         `Assign ${selectedDish.id} → ${subArrayDraft.trim() || "main"}`,
                       )
                     }

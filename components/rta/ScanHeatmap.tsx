@@ -1,14 +1,27 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
-import type { RtaScanSample } from "@/lib/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  addSample,
+  createScanImage,
+  deserializeImage,
+  type ScanImage,
+  type SerializedScanImage,
+} from "@/lib/scan-image";
+import { useTelemetry } from "@/lib/telemetry-store";
+import type { RtaScanContext, RtaScanSample } from "@/lib/types";
 
 /**
- * HTML5 Canvas heatmap for the RTA scan stream.
+ * The RTA scan image (spec §3), rendered as an N×N pixel canvas.
  *
- * Each 1 Hz sample is binned into a (dish offset × frequency) grid; the cell
- * intensity is the averaged sample value. The canvas is redrawn on every batch
- * of new samples so the operator sees the composite image build in real time.
+ * Each 1 Hz sample lands on exactly one pixel — `(x, y) = (⌊N(Δα/θ + ½)⌋,
+ * ⌊N(½ − Δδ/θ)⌋)` — and the pixel shows the mean brightness of the (up to
+ * `overlap`) samples that hit it. Pixels that never receive a sample stay holes,
+ * so the image builds up visibly as the dishes sweep the field.
+ *
+ * The grid geometry and the pixels that arrived before this page loaded come
+ * from `GET /api/rta/scan`; everything after that is folded in from the live SSE
+ * stream without a round trip.
  */
 
 export interface ScanSamplePoint {
@@ -16,256 +29,433 @@ export interface ScanSamplePoint {
   timestamp: string;
 }
 
-const COLS = 160;
-const ROWS = 72;
-const CANVAS_W = 960;
-const CANVAS_H = 420;
-const PAD = { left: 84, right: 14, top: 14, bottom: 30 };
+const CANVAS_W = 640;
+const CANVAS_H = 640;
+const PAD = { left: 44, right: 96, top: 12, bottom: 28 };
 
-/** Deep-space → teal → signal → solar gradient. */
-function colorFor(value: number): string {
-  const t = Math.min(Math.max(value, 0), 1);
-  const stops: Array<[number, [number, number, number]]> = [
-    [0, [10, 20, 32]],
-    [0.25, [14, 68, 94]],
-    [0.5, [14, 124, 102]],
-    [0.75, [56, 242, 195]],
-    [1, [255, 209, 102]],
-  ];
-  let lower = stops[0];
-  let upper = stops[stops.length - 1];
-  for (let index = 0; index < stops.length - 1; index += 1) {
-    if (t >= stops[index][0] && t <= stops[index + 1][0]) {
-      lower = stops[index];
-      upper = stops[index + 1];
+/** Deep-space → teal → signal → solar. */
+const STOPS: Array<[number, [number, number, number]]> = [
+  [0, [10, 20, 32]],
+  [0.25, [14, 68, 94]],
+  [0.5, [14, 124, 102]],
+  [0.75, [56, 242, 195]],
+  [1, [255, 209, 102]],
+];
+
+function colorAt(t: number): [number, number, number] {
+  const clamped = Math.min(Math.max(t, 0), 1);
+  let lower = STOPS[0];
+  let upper = STOPS[STOPS.length - 1];
+  for (let index = 0; index < STOPS.length - 1; index += 1) {
+    if (clamped >= STOPS[index][0] && clamped <= STOPS[index + 1][0]) {
+      lower = STOPS[index];
+      upper = STOPS[index + 1];
       break;
     }
   }
   const span = upper[0] - lower[0] || 1;
-  const ratio = (t - lower[0]) / span;
-  const channel = (a: number, b: number) => Math.round(a + (b - a) * ratio);
-  return `rgb(${channel(lower[1][0], upper[1][0])}, ${channel(lower[1][1], upper[1][1])}, ${channel(
-    lower[1][2],
-    upper[1][2],
-  )})`;
+  const ratio = (clamped - lower[0]) / span;
+  return [
+    Math.round(lower[1][0] + (upper[1][0] - lower[1][0]) * ratio),
+    Math.round(lower[1][1] + (upper[1][1] - lower[1][1]) * ratio),
+    Math.round(lower[1][2] + (upper[1][2] - lower[1][2]) * ratio),
+  ];
 }
 
-function finite(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+function cssColor(t: number): string {
+  const [r, g, b] = colorAt(t);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+interface ImageStats {
+  filled: number;
+  pixels: number;
+  min: number;
+  max: number;
+  samples: number;
+  skipped: number;
+  outside: number;
+}
+
+/** A scan the server rebuilt from stored events and samples. */
+interface RecoveredScan {
+  context: RtaScanContext;
+  image: SerializedScanImage | null;
+  storedSamples: number;
+}
+
+function measure(image: ScanImage): ImageStats {
+  let filled = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < image.samples.length; index += 1) {
+    if (image.samples[index] === 0) continue;
+    filled += 1;
+    const value = image.intensity[index];
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  return {
+    filled,
+    pixels: image.samples.length,
+    min: filled ? min : 0,
+    max: filled ? max : 0,
+    samples: image.total,
+    skipped: image.skipped,
+    outside: image.outside,
+  };
+}
+
+function drawImage(
+  canvas: HTMLCanvasElement,
+  image: ScanImage,
+  stats: ImageStats,
+  scanning: boolean,
+): void {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+
+  const plotW = CANVAS_W - PAD.left - PAD.right;
+  const plotH = CANVAS_H - PAD.top - PAD.bottom;
+
+  context.clearRect(0, 0, CANVAS_W, CANVAS_H);
+  context.fillStyle = "#070b13";
+  context.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  context.fillStyle = "#0a101a";
+  context.fillRect(PAD.left, PAD.top, plotW, plotH);
+
+  const { size } = image.geometry;
+
+  // Paint the N×N grid into an offscreen canvas, then scale it up with nearest
+  // neighbour so each grid cell is a crisp square.
+  if (stats.filled > 0) {
+    const offscreen = document.createElement("canvas");
+    offscreen.width = size;
+    offscreen.height = size;
+    const offContext = offscreen.getContext("2d");
+    if (offContext) {
+      const frame = offContext.createImageData(size, size);
+      const span = stats.max - stats.min || 1;
+      for (let index = 0; index < image.samples.length; index += 1) {
+        const offset = index * 4;
+        if (image.samples[index] === 0) {
+          // Hole: leave the plot background visible.
+          frame.data[offset] = 12;
+          frame.data[offset + 1] = 18;
+          frame.data[offset + 2] = 28;
+          frame.data[offset + 3] = 255;
+          continue;
+        }
+        const [r, g, b] = colorAt((image.intensity[index] - stats.min) / span);
+        frame.data[offset] = r;
+        frame.data[offset + 1] = g;
+        frame.data[offset + 2] = b;
+        frame.data[offset + 3] = 255;
+      }
+      offContext.putImageData(frame, 0, 0);
+      context.imageSmoothingEnabled = false;
+      context.drawImage(offscreen, PAD.left, PAD.top, plotW, plotH);
+      context.imageSmoothingEnabled = true;
+    }
+  }
+
+  // Grid + frame.
+  context.strokeStyle = "rgba(124, 140, 163, 0.14)";
+  context.lineWidth = 1;
+  for (let index = 0; index <= 4; index += 1) {
+    const x = PAD.left + (plotW / 4) * index;
+    context.beginPath();
+    context.moveTo(x, PAD.top);
+    context.lineTo(x, PAD.top + plotH);
+    context.stroke();
+    const y = PAD.top + (plotH / 4) * index;
+    context.beginPath();
+    context.moveTo(PAD.left, y);
+    context.lineTo(PAD.left + plotW, y);
+    context.stroke();
+  }
+  context.strokeStyle = "rgba(124, 140, 163, 0.35)";
+  context.strokeRect(PAD.left, PAD.top, plotW, plotH);
+
+  // Axis labels: offsets in degrees, north at the top.
+  const halfDeg = (image.geometry.fovRad / 2) * (180 / Math.PI);
+  context.fillStyle = "#7d8ca3";
+  context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+  context.textBaseline = "middle";
+  context.textAlign = "right";
+  context.fillText(`+${halfDeg.toFixed(2)}°`, PAD.left - 6, PAD.top + 4);
+  context.fillText("0°", PAD.left - 6, PAD.top + plotH / 2);
+  context.fillText(`−${halfDeg.toFixed(2)}°`, PAD.left - 6, PAD.top + plotH - 4);
+  context.textAlign = "center";
+  context.textBaseline = "top";
+  context.fillText("−", PAD.left + 4, PAD.top + plotH + 6);
+  context.fillText("Δ Dec", PAD.left + plotW / 2, PAD.top + plotH + 6);
+  context.fillText("+", PAD.left + plotW - 4, PAD.top + plotH + 6);
+
+  // Colour legend.
+  const legendX = PAD.left + plotW + 18;
+  const legendY = PAD.top + 8;
+  const legendW = 12;
+  const legendH = plotH - 40;
+  const gradient = context.createLinearGradient(0, legendY + legendH, 0, legendY);
+  gradient.addColorStop(0, cssColor(0));
+  gradient.addColorStop(0.5, cssColor(0.5));
+  gradient.addColorStop(1, cssColor(1));
+  context.fillStyle = gradient;
+  context.fillRect(legendX, legendY, legendW, legendH);
+  context.strokeStyle = "rgba(124, 140, 163, 0.4)";
+  context.strokeRect(legendX, legendY, legendW, legendH);
+  context.fillStyle = "#7d8ca3";
+  context.textAlign = "left";
+  context.textBaseline = "middle";
+  context.fillText(stats.max.toFixed(2), legendX + legendW + 6, legendY);
+  context.fillText(stats.min.toFixed(2), legendX + legendW + 6, legendY + legendH);
+
+  if (stats.filled === 0) {
+    context.fillStyle = "rgba(230, 237, 247, 0.55)";
+    context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(
+      scanning ? "Awaiting scan samples…" : "No scan image — start a scan",
+      PAD.left + plotW / 2,
+      PAD.top + plotH / 2,
+    );
+  }
 }
 
 export function ScanHeatmap({
   samples,
   scanning,
-  activeScanId,
+  context: scanContext,
 }: {
   samples: ScanSamplePoint[];
   scanning: boolean;
-  activeScanId?: string | null;
+  /** Geometry of the current scan, from its `started` event. */
+  context: RtaScanContext | null;
 }) {
+  const { mode } = useTelemetry();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const imageRef = useRef<ScanImage | null>(null);
+  const cursorRef = useRef<{ timestamp: string; folded: number }>({ timestamp: "", folded: 0 });
+  const samplesRef = useRef<ScanSamplePoint[]>(samples);
+  samplesRef.current = samples;
 
-  const model = useMemo(() => {
-    const cells = new Float32Array(COLS * ROWS);
-    const counts = new Uint16Array(COLS * ROWS);
+  const [stats, setStats] = useState<ImageStats | null>(null);
+  const [hydrating, setHydrating] = useState(false);
+  const [hydrateNote, setHydrateNote] = useState<string | null>(null);
+  const [recovered, setRecovered] = useState<RecoveredScan | null>(null);
 
-    let maxOffset = 0.25;
-    let fMin = Number.POSITIVE_INFINITY;
-    let fMax = Number.NEGATIVE_INFINITY;
-    let vMin = Number.POSITIVE_INFINITY;
-    let vMax = Number.NEGATIVE_INFINITY;
-    let used = 0;
-
-    for (const point of samples) {
-      const az = finite(point.sample.offsetAzDeg) ?? 0;
-      const el = finite(point.sample.offsetElDeg) ?? 0;
-      const frequency = finite(point.sample.frequencyMhz);
-      const value = finite(point.sample.value);
-      if (frequency === null || value === null) continue;
-
-      const offset = Math.hypot(az, el);
-      if (offset > maxOffset) maxOffset = offset;
-      if (frequency < fMin) fMin = frequency;
-      if (frequency > fMax) fMax = frequency;
-      if (value < vMin) vMin = value;
-      if (value > vMax) vMax = value;
-      used += 1;
-
-      const column = Math.min(COLS - 1, Math.floor((offset / Math.max(maxOffset, 1e-6)) * COLS));
-      // Frequency increases upward on screen.
-      const rowSeed = fMax > fMin ? (frequency - fMin) / (fMax - fMin) : 0.5;
-      const row = Math.min(ROWS - 1, Math.floor((1 - rowSeed) * ROWS));
-      const index = row * COLS + column;
-      cells[index] += value;
-      counts[index] += 1;
-    }
-
-    if (!Number.isFinite(fMin)) {
-      fMin = 0;
-      fMax = 0;
-    }
-    if (!Number.isFinite(vMin)) {
-      vMin = 0;
-      vMax = 0;
-    }
-
-    const valueSpan = vMax - vMin || 1;
-    for (let index = 0; index < cells.length; index += 1) {
-      if (counts[index] === 0) continue;
-      const average = cells[index] / counts[index];
-      cells[index] = (average - vMin) / valueSpan;
-    }
-
-    return {
-      cells,
-      counts,
-      used,
-      maxOffset,
-      fMin,
-      fMax,
-      vMin,
-      vMax: vMax || 1,
+  // A `started` event is published once, so a page opened after the scan
+  // finished has no live context to size the grid with. Ask the server, which
+  // rebuilds it from the stored event.
+  useEffect(() => {
+    if (scanContext || mode !== "live") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch("/api/rta/scan", { cache: "no-store" });
+        if (!response.ok) return;
+        const body = (await response.json()) as {
+          context: RtaScanContext | null;
+          image: SerializedScanImage | null;
+          storedSamples?: number;
+        };
+        if (cancelled || !body.context) return;
+        setRecovered({
+          context: body.context,
+          image: body.image,
+          storedSamples: body.storedSamples ?? 0,
+        });
+      } catch {
+        // Leave the canvas empty; the live stream can still build it.
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
+  }, [scanContext, mode]);
+
+  const activeContext = scanContext ?? recovered?.context ?? null;
+  const scanId = activeContext?.scanId ?? null;
+
+  // Reset + hydrate whenever the scan changes: the grid geometry is fixed for
+  // the life of a scan, and the pixels that predate this page must be rebuilt
+  // from the database rather than lost.
+  useEffect(() => {
+    cursorRef.current = { timestamp: "", folded: 0 };
+    setHydrateNote(null);
+
+    if (!activeContext) {
+      imageRef.current = null;
+      setStats(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const seed = createScanImage({
+      scanId: activeContext.scanId,
+      size: activeContext.gridSize,
+      overlap: activeContext.overlap,
+      fovRad: activeContext.fovRad,
+    });
+    imageRef.current = seed;
+    setStats(measure(seed));
+
+    if (mode !== "live") return;
+
+    /**
+     * Adopt a rebuilt image. Samples the store already buffered must not be
+     * folded twice, so the cursor moves to the newest one.
+     */
+    const adopt = (image: ScanImage, note: string | null) => {
+      imageRef.current = image;
+      const buffered = samplesRef.current;
+      const last = buffered.length ? buffered[buffered.length - 1] : null;
+      cursorRef.current = last
+        ? { timestamp: last.timestamp, folded: countAt(buffered, last.timestamp) }
+        : { timestamp: "", folded: 0 };
+      setStats(measure(image));
+      setHydrateNote(note);
+    };
+
+    // The recovery fetch already returned the rebuilt image.
+    if (recovered && recovered.context.scanId === activeContext.scanId && recovered.image) {
+      adopt(
+        deserializeImage(recovered.image),
+        recovered.storedSamples ? `${recovered.storedSamples} stored samples` : null,
+      );
+      return;
+    }
+
+    setHydrating(true);
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/rta/scan?scanId=${encodeURIComponent(activeContext.scanId)}`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const body = (await response.json()) as {
+          image: SerializedScanImage | null;
+          storedSamples?: number;
+        };
+        if (cancelled || !body.image) return;
+        if (body.image.geometry.scanId !== activeContext.scanId) return;
+
+        adopt(
+          deserializeImage(body.image),
+          body.storedSamples ? `${body.storedSamples} stored samples` : null,
+        );
+      } catch (error) {
+        if (!cancelled) {
+          setHydrateNote(error instanceof Error ? `history unavailable: ${error.message}` : null);
+        }
+      } finally {
+        if (!cancelled) setHydrating(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeContext, recovered, mode]);
+
+  // Fold every sample that arrived since the last render into the accumulator.
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image) return;
+
+    const cursor = cursorRef.current;
+    let folded = 0;
+    for (const point of samples) {
+      if (point.timestamp < cursor.timestamp) continue;
+      if (point.timestamp === cursor.timestamp) {
+        // Timestamps have millisecond resolution, so several dishes can share
+        // one: skip exactly the ones a previous pass already folded.
+        folded += 1;
+        if (folded <= cursor.folded) continue;
+      }
+      const { sample } = point;
+      if (sample.scanId && sample.scanId !== image.geometry.scanId) continue;
+      addSample(image, sample.raOffsetRad, sample.decOffsetRad, sample.signalStrength);
+    }
+
+    const last = samples.length ? samples[samples.length - 1] : null;
+    if (last) {
+      cursorRef.current =
+        last.timestamp === cursor.timestamp
+          ? { timestamp: cursor.timestamp, folded: Math.max(cursor.folded, folded) }
+          : { timestamp: last.timestamp, folded: countAt(samples, last.timestamp) };
+    }
+
+    setStats(measure(image));
   }, [samples]);
 
+  // Redraw whenever the accumulator or the scan state changes.
   useEffect(() => {
     const canvas = canvasRef.current;
+    const image = imageRef.current;
     if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-
-    const plotW = CANVAS_W - PAD.left - PAD.right;
-    const plotH = CANVAS_H - PAD.top - PAD.bottom;
-    const cellW = plotW / COLS;
-    const cellH = plotH / ROWS;
-
-    context.clearRect(0, 0, CANVAS_W, CANVAS_H);
-    context.fillStyle = "#070b13";
-    context.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-    // Plot background + subtle grid.
-    context.fillStyle = "#0a101a";
-    context.fillRect(PAD.left, PAD.top, plotW, plotH);
-
-    for (let index = 0; index < model.cells.length; index += 1) {
-      if (model.counts[index] === 0) continue;
-      const row = Math.floor(index / COLS);
-      const column = index % COLS;
-      context.fillStyle = colorFor(model.cells[index]);
-      context.fillRect(
-        PAD.left + column * cellW,
-        PAD.top + row * cellH,
-        Math.ceil(cellW) + 0.5,
-        Math.ceil(cellH) + 0.5,
-      );
-    }
-
-    context.strokeStyle = "rgba(124, 140, 163, 0.14)";
-    context.lineWidth = 1;
-    const columns = 8;
-    for (let index = 0; index <= columns; index += 1) {
-      const x = PAD.left + (plotW / columns) * index;
-      context.beginPath();
-      context.moveTo(x, PAD.top);
-      context.lineTo(x, PAD.top + plotH);
-      context.stroke();
-    }
-    const rows = 4;
-    for (let index = 0; index <= rows; index += 1) {
-      const y = PAD.top + (plotH / rows) * index;
-      context.beginPath();
-      context.moveTo(PAD.left, y);
-      context.lineTo(PAD.left + plotW, y);
-      context.stroke();
-    }
-
-    context.strokeStyle = "rgba(124, 140, 163, 0.35)";
-    context.strokeRect(PAD.left, PAD.top, plotW, plotH);
-
-    context.fillStyle = "#7d8ca3";
-    context.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
-    context.textBaseline = "middle";
-
-    // Y axis: frequency band.
-    if (model.fMax > 0) {
-      context.textAlign = "right";
-      context.fillText(`${model.fMax.toFixed(0)} MHz`, PAD.left - 8, PAD.top + 6);
-      context.fillText(
-        `${((model.fMax + model.fMin) / 2).toFixed(0)}`,
-        PAD.left - 8,
-        PAD.top + plotH / 2,
-      );
-      context.fillText(`${model.fMin.toFixed(0)} MHz`, PAD.left - 8, PAD.top + plotH - 6);
-    }
-
-    // X axis: dish offset.
-    context.textAlign = "center";
-    context.textBaseline = "top";
-    context.fillText("0.00°", PAD.left + 2, PAD.top + plotH + 8);
-    context.fillText(
-      `${(model.maxOffset / 2).toFixed(2)}°`,
-      PAD.left + plotW / 2,
-      PAD.top + plotH + 8,
-    );
-    context.fillText(
-      `${model.maxOffset.toFixed(2)}° dish offset`,
-      PAD.left + plotW - 40,
-      PAD.top + plotH + 8,
-    );
-
-    // Intensity legend.
-    const legendW = 110;
-    const legendX = CANVAS_W - PAD.right - legendW;
-    const legendY = PAD.top + 10;
-    const gradient = context.createLinearGradient(legendX, 0, legendX + legendW, 0);
-    gradient.addColorStop(0, colorFor(0));
-    gradient.addColorStop(0.5, colorFor(0.5));
-    gradient.addColorStop(1, colorFor(1));
-    context.fillStyle = gradient;
-    context.fillRect(legendX, legendY, legendW, 6);
-    context.strokeStyle = "rgba(124, 140, 163, 0.4)";
-    context.strokeRect(legendX, legendY, legendW, 6);
-    context.fillStyle = "#7d8ca3";
-    context.textAlign = "left";
-    context.textBaseline = "top";
-    context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
-    context.fillText(
-      `${model.vMin.toFixed(1)} → ${model.vMax.toFixed(1)}`,
-      legendX,
-      legendY + 10,
-    );
-
-    if (model.used === 0) {
-      context.fillStyle = "rgba(230, 237, 247, 0.5)";
-      context.font = "13px ui-monospace, SFMono-Regular, Menlo, monospace";
+    if (!image || !stats) {
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      context.fillStyle = "#070b13";
+      context.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      context.fillStyle = "rgba(230, 237, 247, 0.55)";
+      context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
       context.textAlign = "center";
       context.textBaseline = "middle";
-      context.fillText(
-        scanning ? "Awaiting scan samples…" : "No scan samples — start a scan to build the map",
-        PAD.left + plotW / 2,
-        PAD.top + plotH / 2,
-      );
+      context.fillText("No active scan", CANVAS_W / 2, CANVAS_H / 2);
+      return;
     }
-  }, [model, scanning]);
+    drawImage(canvas, image, stats, scanning);
+  }, [stats, scanning, scanId]);
+
+  const coverage = useMemo(
+    () => (stats && stats.pixels ? (stats.filled / stats.pixels) * 100 : 0),
+    [stats],
+  );
 
   return (
     <div className="space-y-2">
-      <canvas
-        ref={canvasRef}
-        width={CANVAS_W}
-        height={CANVAS_H}
-        className="w-full rounded-lg border border-console-edge/70 bg-console-void"
-        aria-label="Scan composite heatmap of dish offsets against frequency samples"
-        role="img"
-      />
+      <div className="flex justify-center">
+        <canvas
+          ref={canvasRef}
+          width={CANVAS_W}
+          height={CANVAS_H}
+          className="max-h-[560px] w-full max-w-[560px] rounded-lg border border-console-edge/70 bg-console-void"
+          aria-label="Scan image built from pointing offsets and signal strength"
+          role="img"
+        />
+      </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[10px] uppercase tracking-[0.12em] text-console-muted">
-        <span>{model.used} samples in buffer</span>
-        <span>offset 0 – {model.maxOffset.toFixed(2)}°</span>
-        <span>
-          band {model.fMin.toFixed(0)} – {model.fMax.toFixed(0)} MHz
-        </span>
-        <span>scan {activeScanId ?? "—"}</span>
+        <span>{stats ? `${stats.filled}/${stats.pixels} pixels` : "no grid"}</span>
+        <span>{coverage.toFixed(0)}% coverage</span>
+        <span>{stats?.samples ?? 0} samples</span>
+        {stats && stats.skipped > 0 && <span>{stats.skipped} no-signal</span>}
+        {activeContext && (
+          <span>
+            N={activeContext.gridSize} · overlap {activeContext.overlap} ·
+            {" "}
+            {(activeContext.fovRad * (180 / Math.PI)).toFixed(2)}° fov
+          </span>
+        )}
+        <span>scan {scanId ?? "—"}</span>
+        {hydrating && <span className="text-console-signal">rebuilding…</span>}
+        {!hydrating && hydrateNote && <span>{hydrateNote}</span>}
       </div>
     </div>
   );
+}
+
+/** How many buffered samples share the given timestamp. */
+function countAt(samples: ScanSamplePoint[], timestamp: string): number {
+  let count = 0;
+  for (const point of samples) {
+    if (point.timestamp === timestamp) count += 1;
+  }
+  return count;
 }
